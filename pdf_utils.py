@@ -70,7 +70,6 @@ def is_likely_metadata_or_footer(line):
          if not re.search(r"[a-zA-Z]{4,}", line): return True
     return False
 
-# --- Consolidated Heading Checker ---
 def check_heading_heuristics(line_dict, page_width, dominant_font_size, current_chapter_title):
     """
     Analyzes a line dictionary from page.get_text('dict') to determine heading type.
@@ -80,38 +79,90 @@ def check_heading_heuristics(line_dict, page_width, dominant_font_size, current_
     words = line_text.split()
     num_words = len(words)
 
-    if not line_text or num_words == 0: return None, None
-    if is_likely_metadata_or_footer(line_text): return None, None
+    if not line_text or num_words == 0:
+        return None, None
+    if is_likely_metadata_or_footer(line_text):
+        return None, None
 
-    # --- Extract Line Properties ---
+    # --- Line stats ---
     max_line_size = 0
     min_line_size = 1000
     total_chars = 0
     italic_chars = 0
     bold_chars = 0
     font_names = set()
-    is_consistent_size = False
 
     try:
         valid_spans = [s for s in line_dict["spans"] if s['size'] > 5 and s['text'].strip()]
-        if not valid_spans: return None, None # Skip if no valid spans
+        if not valid_spans:
+            return None, None
 
         sizes_in_line = [s["size"] for s in valid_spans]
         max_line_size = round(max(sizes_in_line), 1)
         min_line_size = round(min(sizes_in_line), 1)
-        is_consistent_size = (max_line_size - min_line_size) < 1.5 # Font size mostly the same
+        is_consistent_size = (max_line_size - min_line_size) < 1.5
 
         for s in valid_spans:
             span_len = len(s['text'].strip())
             total_chars += span_len
             font_names.add(s['font'])
-            flags = s.get('flags', 0) # Default to 0 if flags missing
-            if flags & 1: italic_chars += span_len # Italic flag
-            if flags & 4: bold_chars += span_len # Bold flag
+            flags = s.get('flags', 0)
+            if flags & 1:
+                italic_chars += span_len
+            if flags & 4:
+                bold_chars += span_len
 
-    except Exception as e:
-        # print(f"Debug: Error processing spans for '{line_text}': {e}")
+    except Exception:
         return None, None
+
+    italic_ratio = (italic_chars / total_chars) if total_chars > 0 else 0
+    bold_ratio = (bold_chars / total_chars) if total_chars > 0 else 0
+    is_mostly_italic = italic_ratio > 0.6
+    is_mostly_bold = bold_ratio > 0.6
+
+    # --- Centering heuristic ---
+    line_bbox = line_dict.get('bbox', None)
+    is_centered = False
+    if line_bbox and page_width > 0:
+        line_width = line_bbox[2] - line_bbox[0]
+        left_margin = line_bbox[0]
+        right_margin = page_width - line_bbox[2]
+        if abs(left_margin - right_margin) < (page_width * 0.12) and left_margin > (page_width * 0.1):
+            is_centered = True
+
+    # --- Heuristic rules ---
+    is_significantly_larger = dominant_font_size and max_line_size >= dominant_font_size + 1.0
+
+    # 1. Explicit chapter identifiers
+    if re.match(r"^\s*(CHAPTER|SECTION|PART)\s+[IVXLCDM\d]+", line_text, re.IGNORECASE) and num_words < 8:
+        return 'chapter', line_text
+
+    # 2. Large or styled headings
+    if (is_significantly_larger or is_mostly_italic or is_mostly_bold) and num_words <= 10:
+        if not line_text[-1] in ['.', '?', '!', ':', ',', ';']:
+            if is_significantly_larger or (is_mostly_italic and is_centered) or (is_mostly_bold and is_centered):
+                return 'chapter', line_text
+
+    # 3. NEW: Relaxed condition for centered + italic lines
+    if is_centered and is_mostly_italic and is_consistent_size and abs(max_line_size - dominant_font_size) <= 0.5:
+        if 3 <= num_words <= 12:
+            return 'chapter', line_text
+
+    # 4. Keyword match for titles (optional fallback)
+    heading_keywords = ["Paradise", "Creation Plan", "Life After Death", "Afterworld", "Accountability", "Judged", "God-Oriented"]
+    if any(kw.lower() in line_text.lower() for kw in heading_keywords):
+        if is_mostly_italic and num_words <= 12:
+            return 'chapter', line_text
+
+    # 5. Subchapter fallback
+    if (is_mostly_italic or is_mostly_bold) and 4 <= num_words <= 12 and not line_text.endswith(('.', '?', '!', ':')):
+        if current_chapter_title:
+            return 'subchapter', line_text
+        else:
+            return 'chapter', line_text
+
+    return None, None
+
 
     # Calculate style ratios (only if total_chars > 0)
     italic_ratio = (italic_chars / total_chars) if total_chars > 0 else 0
