@@ -9,10 +9,15 @@ import time
 # --- Download NLTK data (needed once) ---
 try:
     nltk.data.find('tokenizers/punkt')
-except nltk.downloader.DownloadError:
+except LookupError: # <--- Correct exception to catch for find()
     st.info("Downloading NLTK sentence tokenizer data (punkt)...")
-    nltk.download('punkt', quiet=True)
-    st.success("NLTK data downloaded.")
+    try:
+        nltk.download('punkt', quiet=True)
+        st.success("NLTK data downloaded.")
+    except Exception as e: # Catch potential errors during download itself
+        st.error(f"Failed to download NLTK 'punkt' data: {e}")
+except Exception as e_find: # Catch other potential errors during find()
+    st.error(f"An error occurred checking NLTK data: {e_find}")
 
 # --- Constants ---
 TARGET_TOKENS = 200
