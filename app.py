@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
 import fitz  # PyMuPDF
-import tiktoken # For token counting
+import tiktoken
 import re
-import nltk # For sentence splitting
-import time # To avoid hitting rate limits if using APIs later
+import nltk
+import time
 
 # --- Download NLTK data (needed once) ---
 try:
@@ -16,221 +16,252 @@ except nltk.downloader.DownloadError:
 
 # --- Constants ---
 TARGET_TOKENS = 200
-# Overlap now defined in sentences, adjust as needed
-OVERLAP_SENTENCES = 2
+OVERLAP_SENTENCES = 2 # Number of sentences to overlap
 
 # --- Helper Functions ---
 
 def get_tokenizer():
     """Initializes and returns the tokenizer."""
     try:
-        # Using cl100k_base, common for GPT-3.5/4
         return tiktoken.get_encoding("cl100k_base")
     except Exception as e:
         st.error(f"Error initializing tokenizer: {e}")
         return None
 
-def is_likely_heading(sentence):
-    """Basic heuristic to check if a sentence is a heading."""
-    sentence = sentence.strip()
-    if not sentence:
-        return False
-    # Short sentence?
-    if len(sentence.split()) < 10:
-        # Mostly uppercase? (Check ratio)
-        if sum(1 for c in sentence if c.isupper()) / len(sentence.replace(" ","")) > 0.6:
-             return True
-        # Ends with no punctuation or specific chars often NOT in headings?
-        if not sentence[-1] in ['.', '?', '!', ':', ',']:
-             # Check if it resembles a title case structure (simple check)
-             if sentence.istitle() and len(sentence.split()) > 1:
-                 return True
-    # Might be just a number (like page number)
-    if sentence.isdigit():
-        return False
-    # Could add more rules (e.g., starts with 'Chapter', 'Section', roman numerals)
-    return False
+# --- Heuristics for Structure Detection (NEEDS TUNING) ---
+def is_likely_chapter_heading(line):
+    """Guess if a line is a chapter heading."""
+    line = line.strip()
+    if not line: return None
+    # Simple pattern check (adapt to your books)
+    if re.match(r"^\s*CHAPTER\s+\d+", line, re.IGNORECASE): return line
+    if re.match(r"^\s*[IVXLCDM]+\.\s+", line): return line # Roman numerals
+    if re.match(r"^\s*\d+\.\s+", line) and len(line.split()) < 7: return line # Numbered list start, short
+    # Less reliable: All caps, short line
+    if line.isupper() and len(line.split()) < 7 and len(line) > 3: return line
+    return None
+
+def is_likely_subchapter_heading(line, current_chapter):
+    """Guess if a line is a subchapter heading (more difficult)."""
+    line = line.strip()
+    if not line: return None
+    # Avoid detecting chapter headings again
+    if is_likely_chapter_heading(line): return None
+    # Title case, relatively short, not ending in typical punctuation
+    if (line.istitle() or (sum(1 for c in line if c.isupper()) / len(line.replace(" ","")) > 0.3 and len(line.split())>1) ) \
+       and len(line.split()) < 10 \
+       and len(line) > 3 \
+       and not line[-1] in ['.', '?', '!', ':', ','] \
+       and current_chapter is not None: # Only detect subchapters *within* a chapter
+           return line
+    return None
 
 def is_likely_metadata_or_footer(line):
-    """Basic heuristic to filter out metadata/footers."""
+    """Basic heuristic to filter out metadata/footers/page numbers."""
     line = line.strip()
     # Empty line
-    if not line:
-        return True
-    # Just a page number
-    if line.isdigit():
-        return True
-    # Common footer/header patterns (simple examples)
-    if "www." in line or ".com" in line or "@" in line:
-        return True
-    if line.startswith("Page ") and line.replace("Page ","").isdigit():
-         return True
-    # Very short lines might be suspect, but keep for now unless clearly not content
-    # if len(line.split()) < 3 and not is_likely_heading(line):
-    #     return True
+    if not line: return True
+    # Just a page number (potentially surrounded by --- or similar)
+    cleaned_line = re.sub(r"^[\s\-—_]+|[\s\-—_]+$", "", line) # Remove surrounding dashes/spaces
+    if cleaned_line.isdigit(): return True
+    # Common footer/header patterns
+    if "www." in line or ".com" in line or "@" in line or "goodwordbooks" in line or "cpsglobal" in line: return True
+    if re.match(r"^\s*Page\s+\d+\s*$", line, re.IGNORECASE): return True
     # Check for copyright symbols or typical boilerplate starts
-    if "©" in line or "Copyright" in line or "First Published" in line:
-        return True
-    # Add more specific rules based on your documents
+    if "©" in line or "Copyright" in line or re.match(r"^\s*First Published", line): return True
+    if "ISBN" in line: return True
+    # Lines that are just decorative separators
+    if len(set(line.strip())) < 3 and len(line.strip()) > 3: # e.g., "------" or "****"
+         return True
+    # Lines that seem like TOC entries (needs refinement)
+    if re.match(r"^[.\s]*\d+$", line.split()[-1]) and len(line) < 80: # Ends in number, possibly with dots
+        # Check if it doesn't look like a normal sentence ending in a number
+        if not re.search(r"[a-zA-Z]{3,}", line): # Doesn't contain longer words
+             return True
     return False
 
-
-def extract_sentences_with_pages(uploaded_file):
-    """Extracts text, cleans it, splits into sentences, and tracks page numbers."""
+def extract_sentences_with_structure(uploaded_file):
+    """Extracts text, cleans, splits sentences, tracks pages & detects headings."""
     doc = None
-    sentences_with_pages = [] # List to store (sentence, page_num, is_heading) tuples
+    # List stores: (sentence, page_num, chapter_title_on_this_line, subchapter_title_on_this_line)
+    sentences_structure = []
+    current_chapter_title_state = None # Keep track of the current chapter
 
     try:
         doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-        full_clean_text = ""
-        for page_num, page in enumerate(doc):
+        for page_num_0based, page in enumerate(doc):
+            page_num = page_num_0based + 1
             page_text = page.get_text("text")
-            if not page_text:
-                continue
+            if not page_text: continue
 
-            # Basic Cleaning - Remove likely metadata/footers line by line
             lines = page_text.split('\n')
-            cleaned_lines = [line for line in lines if not is_likely_metadata_or_footer(line)]
-            cleaned_page_text = "\n".join(cleaned_lines).strip()
+            temp_page_sentences = []
 
-            if not cleaned_page_text:
-                continue
+            for line in lines:
+                if is_likely_metadata_or_footer(line):
+                    continue # Skip this line
 
-            # Sentence Splitting
-            try:
-                page_sentences = nltk.sent_tokenize(cleaned_page_text)
-                for sentence in page_sentences:
-                    sentence_clean = sentence.replace('\n', ' ').strip()
-                    if sentence_clean: # Ignore empty strings after cleaning
-                        heading_flag = is_likely_heading(sentence_clean)
-                        sentences_with_pages.append((sentence_clean, page_num + 1, heading_flag))
-            except Exception as e:
-                st.warning(f"NLTK sentence tokenization failed on page {page_num+1}: {e}. Treating page as single block.")
-                # Fallback: treat the whole cleaned page text as one 'sentence'
-                heading_flag = is_likely_heading(cleaned_page_text)
-                sentences_with_pages.append((cleaned_page_text, page_num + 1, heading_flag))
+                line_clean = line.strip()
+                if not line_clean: continue
 
-        return sentences_with_pages
+                # --- Heading Detection ---
+                chapter_heading = is_likely_chapter_heading(line_clean)
+                subchapter_heading = None
+                if not chapter_heading: # Only check for subchapter if it's not a chapter
+                    subchapter_heading = is_likely_subchapter_heading(line_clean, current_chapter_title_state)
+
+                if chapter_heading:
+                    current_chapter_title_state = chapter_heading # Update current chapter
+                    temp_page_sentences.append((chapter_heading, page_num, chapter_heading, None))
+                elif subchapter_heading:
+                     temp_page_sentences.append((subchapter_heading, page_num, None, subchapter_heading))
+                else:
+                    # --- Sentence Splitting for non-headings ---
+                    try:
+                        sentences_in_line = nltk.sent_tokenize(line_clean)
+                        for sentence in sentences_in_line:
+                            sentence_clean_again = sentence.strip()
+                            if sentence_clean_again:
+                                temp_page_sentences.append((sentence_clean_again, page_num, None, None))
+                    except Exception as e:
+                        # Fallback for tokenization error on a specific line
+                        st.warning(f"NLTK failed on line: '{line_clean}' on page {page_num}. Treating as single sentence. Error: {e}")
+                        if line_clean: # Ensure it's not empty
+                           temp_page_sentences.append((line_clean, page_num, None, None))
+
+            sentences_structure.extend(temp_page_sentences)
+
+        return sentences_structure
     except Exception as e:
         st.error(f"Error reading or processing PDF: {e}")
         return None
     finally:
-        if doc:
-            doc.close()
+        if doc: doc.close()
 
-def chunk_sentences(sentences_with_pages, tokenizer):
-    """Chunks sentences with overlap based on target tokens."""
-    if not tokenizer:
-        st.error("Tokenizer not available.")
-        return []
-    if not sentences_with_pages:
-        st.warning("No sentences extracted to chunk.")
-        return []
+def chunk_structured_sentences(sentences_structure, tokenizer):
+    """Chunks sentences, respecting chapters and associating titles."""
+    if not tokenizer: st.error("Tokenizer not available."); return []
+    if not sentences_structure: st.warning("No sentences extracted."); return []
 
     chunks_data = []
-    current_chunk_sentences = []
+    current_chunk_sentence_tuples = [] # Stores (sentence, page, ch_head, sub_head)
     current_chunk_tokens = 0
-    start_index = 0
+    current_chapter = "Unknown" # Default/Initial
+    current_subchapter = None # Optional, reset with chapter
 
-    while start_index < len(sentences_with_pages):
-        sentence, page_num, is_heading = sentences_with_pages[start_index]
+    for i, (sentence, page_num, ch_title, sub_title) in enumerate(sentences_structure):
+
+        # --- Handle Detected Headings ---
+        is_chapter_heading = ch_title is not None
+        is_subchapter_heading = sub_title is not None
+
+        # If it's a new CHAPTER heading:
+        if is_chapter_heading:
+            # 1. Finalize the PREVIOUS chunk if it exists
+            if current_chunk_sentence_tuples:
+                chunk_text = " ".join([s[0] for s in current_chunk_sentence_tuples])
+                start_page = current_chunk_sentence_tuples[0][1]
+                chunks_data.append({
+                    "chunk_text": chunk_text,
+                    "page_number": start_page,
+                    "chapter_title": current_chapter,
+                    "subchapter_title": current_subchapter
+                })
+            # 2. Update state for the *next* chunks
+            current_chapter = ch_title
+            current_subchapter = None # Reset subchapter when chapter changes
+            # 3. Reset current chunk variables - the heading itself doesn't start the *content* chunk
+            current_chunk_sentence_tuples = []
+            current_chunk_tokens = 0
+            continue # Skip adding the heading itself as the start of a content chunk
+
+        # If it's a new SUBCHAPTER heading:
+        if is_subchapter_heading:
+            # Update state for the *next* sentences/chunks
+            current_subchapter = sub_title
+            # We *don't* force a chunk break for subchapters here, but you could add it
+            # For now, just record it. The subchapter title *will* be part of the chunk.
+
+
+        # --- Calculate tokens for the current sentence ---
         sentence_tokens = len(tokenizer.encode(sentence))
 
-        # Start new chunk if current sentence is a heading and chunk is not empty
-        if is_heading and current_chunk_sentences:
-             # Finalize the previous chunk
-            chunk_text = " ".join([s[0] for s in current_chunk_sentences])
-            start_page = current_chunk_sentences[0][1] # Page of the first sentence
-            chunks_data.append({
-                "chunk_text": chunk_text,
-                "page_number": start_page,
-                "heading_before": is_heading # Flag if a heading *immediately* follows this chunk
-            })
-            # Reset for the new chunk starting *with* the heading
-            current_chunk_sentences = [(sentence, page_num, is_heading)]
-            current_chunk_tokens = sentence_tokens
-            start_index += 1
-            continue # Move to next sentence
-
-
-        # If adding the current sentence exceeds the target token count
-        # finalize the current chunk (unless it's empty)
+        # --- Check if adding this sentence exceeds target size ---
         if current_chunk_tokens > 0 and (current_chunk_tokens + sentence_tokens > TARGET_TOKENS):
-            chunk_text = " ".join([s[0] for s in current_chunk_sentences])
-            start_page = current_chunk_sentences[0][1] # Page of the first sentence
+            # 1. Finalize the current chunk
+            chunk_text = " ".join([s[0] for s in current_chunk_sentence_tuples])
+            start_page = current_chunk_sentence_tuples[0][1]
             chunks_data.append({
                 "chunk_text": chunk_text,
                 "page_number": start_page,
-                "heading_before": is_heading # Flag if the sentence causing overflow is a heading
+                "chapter_title": current_chapter,
+                "subchapter_title": current_subchapter
             })
 
-            # --- Overlap Logic ---
-            # Take the last OVERLAP_SENTENCES from the chunk just finished
-            overlap_start_idx = max(0, len(current_chunk_sentences) - OVERLAP_SENTENCES)
-            sentences_for_overlap = current_chunk_sentences[overlap_start_idx:]
+            # 2. --- Overlap Logic ---
+            overlap_start_idx = max(0, len(current_chunk_sentence_tuples) - OVERLAP_SENTENCES)
+            sentences_for_overlap = current_chunk_sentence_tuples[overlap_start_idx:]
 
-            # Start the new chunk with the overlap
-            current_chunk_sentences = sentences_for_overlap
+            # 3. Start the new chunk with the overlap
+            current_chunk_sentence_tuples = sentences_for_overlap
             current_chunk_tokens = sum(len(tokenizer.encode(s[0])) for s in sentences_for_overlap)
 
-            # If the sentence that caused the overflow wasn't added yet, add it now
-            # This check avoids adding the sentence twice if it precisely fills the overlap
-            if (sentence, page_num, is_heading) not in current_chunk_sentences:
-                 current_chunk_sentences.append((sentence, page_num, is_heading))
-                 current_chunk_tokens += sentence_tokens
+            # 4. Add the current sentence (that caused the overflow) to the new chunk
+            # Check if it wasn't already part of the overlap
+            if (sentence, page_num, ch_title, sub_title) not in current_chunk_sentence_tuples:
+                current_chunk_sentence_tuples.append((sentence, page_num, ch_title, sub_title))
+                current_chunk_tokens += sentence_tokens
 
         else:
-            # Add the current sentence to the chunk
-            current_chunk_sentences.append((sentence, page_num, is_heading))
+            # --- Add current sentence to the current chunk ---
+            current_chunk_sentence_tuples.append((sentence, page_num, ch_title, sub_title))
             current_chunk_tokens += sentence_tokens
 
-        # Move to the next sentence
-        start_index += 1
 
-    # Add the last remaining chunk if it's not empty
-    if current_chunk_sentences:
-        chunk_text = " ".join([s[0] for s in current_chunk_sentences])
-        start_page = current_chunk_sentences[0][1]
+    # Add the very last chunk if it has content
+    if current_chunk_sentence_tuples:
+        chunk_text = " ".join([s[0] for s in current_chunk_sentence_tuples])
+        start_page = current_chunk_sentence_tuples[0][1]
         chunks_data.append({
             "chunk_text": chunk_text,
             "page_number": start_page,
-            "heading_before": False # No heading follows the very last chunk
+            "chapter_title": current_chapter, # Use the last known chapter/subchapter
+            "subchapter_title": current_subchapter
         })
 
     return chunks_data
 
-
 # --- Streamlit App ---
-st.title("PDF Sentence Chunker (Improved)")
+st.title("PDF Structured Chunker")
+st.write("Upload a PDF. The app will attempt to clean it, identify chapters/subchapters (heuristically), and create overlapping sentence-based chunks, preventing chunks from spanning across detected chapter breaks.")
 
-uploaded_file = st.file_uploader("Upload Book PDF", type="pdf")
-tokenizer = get_tokenizer() # Initialize once
+uploaded_file = st.file_uploader("Upload Book PDF", type="pdf", key="pdf_uploader")
+tokenizer = get_tokenizer()
 
 if uploaded_file and tokenizer:
-    if st.button("Chunk PDF"):
-        with st.spinner("Reading PDF, cleaning, and extracting sentences..."):
-            sentences_data = extract_sentences_with_pages(uploaded_file)
+    if st.button("Chunk PDF with Structure", key="chunk_button"):
+        with st.spinner("Reading PDF, cleaning, and extracting structured sentences..."):
+            sentences_data = extract_sentences_with_structure(uploaded_file)
 
         if sentences_data:
-            st.success(f"Extracted {len(sentences_data)} sentences.")
-            with st.spinner(f"Chunking sentences into ~{TARGET_TOKENS} token chunks with ~{OVERLAP_SENTENCES} sentence overlap..."):
-                chunk_list = chunk_sentences(sentences_data, tokenizer)
+            st.success(f"Extracted {len(sentences_data)} potential sentences/headings.")
+            with st.spinner(f"Chunking sentences into ~{TARGET_TOKENS} token chunks..."):
+                chunk_list = chunk_structured_sentences(sentences_data, tokenizer)
 
             if chunk_list:
                 st.success(f"Text chunked into {len(chunk_list)} chunks.")
-                # Optionally remove the heading_before column if not needed in final CSV
-                # df = pd.DataFrame(chunk_list, columns=['chunk_text', 'page_number'])
                 df = pd.DataFrame(chunk_list)
                 st.dataframe(df)
 
-                csv = df.to_csv(index=False).encode('utf-8')
+                csv_data = df.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="Download data as CSV",
-                    data=csv,
-                    file_name=f'{uploaded_file.name.replace(".pdf", "")}_sentence_chunks.csv',
+                    data=csv_data,
+                    file_name=f'{uploaded_file.name.replace(".pdf", "")}_structured_chunks.csv',
                     mime='text/csv',
+                    key="download_csv"
                 )
             else:
                 st.error("Chunking failed or resulted in no chunks.")
         else:
-            st.error("Could not extract sentences from PDF.")
+            st.error("Could not extract structured sentences from PDF.")
