@@ -1,12 +1,11 @@
 import fitz
 import re
 import nltk
-import statistics
 import streamlit as st
 
 # --- NLTK Download Logic ---
-# (Keep as is)
 def download_nltk_data(resource_name, resource_path):
+    # ...(keep as is)...
     try:
         nltk.data.find(resource_path)
     except LookupError:
@@ -25,8 +24,39 @@ def download_nltk_data(resource_name, resource_path):
 
 
 # --- Metadata/Footer Check ---
-# (Keep as is, but you might need to add more specific rules for your PDF)
-def is_likely_metadata_or_footer(line):
+def is_likely_metadata_or_footer(line):", line_text, re.IGNORECASE) and num_words < 8:
+        return 'chapter', line_text
+
+    # 2. Style (Italic/Bold Hint) + Title Case + Short = Likely Chapter
+    # This combination strongly matches your examples
+    if (is_italic_hint or is_bold_hint) and is_title_case and MIN_HEADING_WORDS <= num_words <= MAX_HEADING_WORDS:
+         if not line_text[-1] in ['.', '?', '!', ':', ',', ';']: # Check punctuation
+              # print(f"✅ CH (Style+Case+Len): {line_text}") # Debug
+              return 'chapter', line_text
+
+    # 3. Just Title Case + Short = Possibly Subchapter (if in chapter) or Chapter (if not)
+    if is_title_case and MIN_HEADING_WORDS <= num_words <= MAX_HEADING_WORDS + 2: # Allow slightly longer for sub
+         if not line_text[-1] in ['.', '?', '!', ':', ',', ';']:
+             if current_chapter_title:
+                  # print(f"✅ SUB (Case+Len): {line_text}") # Debug
+                  return 'subchapter', line_text
+             else:
+                  # print(f"✅ CH (Case+Len Fallback): {line_text}") # Debug
+                  return 'chapter', line_text # Assume chapter if no context
+
+
+    # 4. Numbered list items - Treat as chapter for now
+    if re.match(r"^\s*[IVXLCDM]+\.?\s+.{3,}", line_text) and num_words < 10: return 'chapter', line_text
+    if re.match(r"^\s*\d+\.?\s+[A-Z].{2,}", line_text) and num_words < 8: return 'chapter', line_text
+
+
+    return None, None # Not detected as heading
+
+
+# --- Main Extraction Function (Using the new checker) ---
+def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_skip=0, start_page_offset=1):
+    
+    # ...(keep as is)...
     line = line.strip()
     if not line: return True
     cleaned_line = re.sub(r"^\W+|\W+$", "", line)
@@ -42,72 +72,29 @@ def is_likely_metadata_or_footer(line):
          if not re.search(r"[a-zA-Z]{4,}", line): return True
     return False
 
-# --- Final Simplified Heading Checker ---
-def check_heading_heuristics_final(line_dict, page_width, is_single_line_block):
+# --- VERY Simplified Heading Checker ---
+def check_heading_layout_only(block_text, block_bbox, page_width):
     """
-    Focuses on: Short lines, centered (approx), alone in block, with title case/style.
-    Returns ('chapter', text) or (None, None). Does not differentiate subchapters.
+    Checks ONLY if the block is a single, short, centered line.
+    Returns ('chapter', text) or (None, None).
     """
-    line_text = "".join(s["text"] for s in line_dict["spans"]).strip()
-    words = line_text.split()
+    # 1. Check if it's a single line block (no internal newlines after stripping)
+    block_text_stripped = block_text.strip()
+    if '\n' in block_text_stripped:
+        return None, None # Not a single line
+
+    # 2. Check Length
+    words = block_text_stripped.split()
     num_words = len(words)
-
-    if not line_text or num_words == 0: return None, None
-    if is_likely_metadata_or_footer(line_text): return None, None
-
-    # --- Configuration (Tune these) ---
-    MAX_HEADING_WORDS = 8
-    MIN_HEADING_WORDS = 2
-    CENTER_TOLERANCE_RATIO = 0.15 # % diff between left/right margin
-    MIN_MARGIN_RATIO = 0.15 # % page width that must be margin on each side
-
-    # --- Check Basic Criteria ---
+    # --- Tunable Parameters ---
+    MAX_HEADING_WORDS = 9
+    MIN_HEADING_WORDS = 1 # Allow single word headings if centered
+    CENTER_TOLERANCE_RATIO = 0.18 # Allow more tolerance
+    MIN_MARGIN_RATIO = 0.15
+    # --- End Tuning ---
     is_short = MIN_HEADING_WORDS <= num_words <= MAX_HEADING_WORDS
-    has_no_end_punctuation = not line_text[-1] in ['.', '?', '!', ':', ',', ';']
 
-    # --- Check Centering (Approximate) ---
-    line_bbox = line_dict.get('bbox', None)
-    is_centered_hint = False
-    if line_bbox and page_width > 0:
-        left_margin = line_bbox[0]
-        right_margin = page_width - line_bbox[2]
-        if abs(left_margin - right_margin) < (page_width * CENTER_TOLERANCE_RATIO) and \
-           left_margin > (page_width * MIN_MARGIN_RATIO) and \
-           right_margin > (page_width * MIN_MARGIN_RATIO):
-            is_centered_hint = True
-
-    # --- Check Style/Case ---
-    is_title_case = line_text.istitle()
-    is_italic_hint = False
-    try: # Check first span font name for italic
-        if line_dict["spans"] and "italic" in line_dict["spans"][0].get('font', '').lower():
-            is_italic_hint = True
-    except Exception: pass
-
-    # --- Decision Logic ---
-    # Primary Trigger: Line is alone in its block, centered, short, and looks like a title
-    if is_single_line_block and is_centered_hint and is_short and has_no_end_punctuation:
-        # Extra check: Must be Title Case OR Italic
-        if is_title_case or is_italic_hint:
-             # Check it contains letters
-            if re.search("[a-zA-Z]", line_text):
-                 # print(f"✅ CH (Layout+Style/Case): {line_text}") # Debug
-                 return 'chapter', line_text
-
-    # Fallback: Explicit keywords (still useful)
-    if re.match(r"^\s*(CHAPTER|SECTION|PART)\s+[IVXLCDM\d]+", line_text, re.IGNORECASE) and num_words < 8:
-        # print(f"✅ CH (Keyword): {line_text}") # Debug
-        return 'chapter', line_text
-
-
-    return None, None # Not detected
-
-# --- Main Extraction Function (Using the final checker) ---
-def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_skip=0, start_page_offset=1):
-    """
-    Extracts text, cleans, splits sentences, tracks pages & detects headings using layout heuristics.
-    """
-    doc = None
+doc = None
     extracted_data = []
     current_chapter_title_state = None # Track last detected chapter
 
@@ -119,56 +106,105 @@ def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_sk
             if page_num_0based < start_skip: continue
             if page_num_0based >= total_pages - end_skip: break
             adjusted_page_num = page_num_0based - start_skip + start_page_offset
-            page_width = page.rect.width
 
             try:
-                # Use get_text("dict") to access line and block info
+                # Use get_text("dict") for span info (font names/flags)
                 blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT | fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
-                for b_idx, b in enumerate(blocks):
+                for b in blocks:
                     if b['type'] == 0: # Text block
-                        block_lines = b['lines']
-                        is_single_line_block = len(block_lines) == 1
-
-                        for l_idx, l in enumerate(block_lines):
-                            line_dict = l
+                        for l in b["lines"]:
+                            line_dict = l # Pass the whole line dictionary
                             line_text = "".join(s["text"] for s in l["spans"]).strip()
 
-                            if not line_text or is_likely_metadata_or_footer(line_text): continue
+                            if not line_text or is_likely_metadata_or_footer(line_text    # 3. Check Centering (Approximate)
+    is_centered_hint = False
+    if block_bbox and page_width > 0:
+        left_margin = block_bbox[0]
+        right_margin = page_width - block_bbox[2]
+        # Check if margins are roughly equal and significant
+        if abs(left_margin - right_margin) < (page_width * CENTER_TOLERANCE_RATIO) and \
+           left_margin > (page_width * MIN_MARGIN_RATIO) and \
+           right_margin > (page_width * MIN_MARGIN_RATIO):
+            is_centered_hint = True
+
+    # 4. Decision: If single line, short, and centered -> Chapter
+    if is_short and is_centered_hint:
+        # Check it contains actual letters
+        if re.search("[a-zA-Z]", block_text_stripped):
+            # print(f"✅ CH (Layout): {block_text_stripped}") # Debug
+            return 'chapter', block_text_stripped
+
+    return None, None
+
+
+# --- Main Extraction Function (Using get_text("blocks")) ---
+def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_skip=0, start_page_offset=1):
+    doc = None
+    extracted_data = []
+    current_chapter_title_state = None # Still track last detected chapter
+
+    try:
+        doc): continue
 
                             # --- Check Heading ---
-                            # Pass the line dict, page width, and whether it's alone in its block
-                            heading_type, heading_text = check_heading_heuristics_final(
+                            heading_type, heading_text = check_heading_heuristics_v8(
                                 line_dict,
-                                page_width,
-                                is_single_line_block
+                                current_chapter_title_state
                             )
 
                             is_heading = heading_type is not None
 
                             if heading_type == 'chapter':
-                                current_chapter_title_state = heading_text
-                                extracted_data.append((heading_text, adjusted_page_num, heading_text, None)) # Chapter tuple
-                            # NOTE: This simple version does NOT detect subchapters
+                                current_chapter_title_state = heading_text # Update state
+                                extracted_data.append((heading_text, adjusted_page_num, heading_text, None))
+                            elif heading_type == 'subchapter':
+                                # Subchapter heading text IS included in the data stream
+                                extracted_data.append((heading_text, adjusted_page_num, None, heading_text))
                             else: # Regular text
                                 try:
                                     sentences_in_line = nltk.sent_tokenize(line_text)
-                                    for sentence in sentences_in_line:
+                                    for sentence in sentences_ = fitz.open(stream=uploaded_file_content, filetype="pdf")
+        total_pages = len(doc)
+
+        for page_num_0based, page in enumerate(doc):
+            # Page Skipping
+            if page_num_0based < start_skip: continue
+            if page_num_0based >= total_pages - end_skip: break
+            adjusted_page_num = page_num_0based - start_skip + start_page_offset
+            page_width = page.rect.width
+
+            try:
+                # Get text as blocks: [x0, y0, x1, y1, "text content...\n...", block_no, block_type]
+                blocks = page.get_text("blocks", sort=Truein_line:
                                         sentence_clean = sentence.strip()
                                         if sentence_clean:
-                                            extracted_data.append((sentence_clean, adjusted_page_num, None, None)) # Text tuple
+                                            extracted_data.append((sentence_clean, adjusted_page_num, None, None))
                                 except Exception as e_nltk:
-                                    st.warning(f"NLTK Error (Page {adjusted_page_num}): Line '{line_text}'. Error: {e_nltk}")
-                                    if line_text: # Append raw line as fallback
-                                        extracted_data.append((line_text, adjusted_page_num, None, None))
+                                    st.warning(f"NLTK Error (Page)
 
-            except Exception as e_page:
+                for b in blocks:
+                    block_text = b[4] # The text content of the block
+                    block_bbox = b[:4] # The bounding box
+                    block_text_clean = block_text.strip() # {adjusted_page_num}): Line '{line_text}'. Error: {e_nltk}")
+                                    if line_text: extracted_data.append((line_ For checking if block is empty
+
+                    if not block_text_clean or is_likely_metadata_or_footer(block_text_clean):
+                        continue
+
+text, adjusted_page_num, None, None))
+
+            except Exception as e_page                    # Check if this block qualifies as a heading based on layout
+                    heading_type:
                  st.error(f"Processing Error: Failed to process page {adjusted_page_num}. Error: {e_page}")
                  continue
 
-        return extracted_data
+, heading_text = check_heading_by_layout(
+                        block        return extracted_data
 
     except Exception as e_main:
-        st.error(f"Main Extraction Error: An unexpected error occurred: {e_main}")
+        st.error(f"Main Extraction Error: An unexpected error occurred: {_text, # Pass the raw block text
+                        block_bbox,
+e_main}")
         st.exception(e_main)
         return None
     finally:
