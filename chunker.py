@@ -4,92 +4,100 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
     """
     Chunks sentences provided as structured tuples, respecting chapters
     and associating chapter/subchapter titles.
-    Input: [(sentence/heading_text, page_num, chapter_title, subchapter_title)]
-    Output: List of dictionaries [{'chunk_text': ..., 'page_number': ..., 'chapter_title': ..., 'subchapter_title': ...}]
+    Input: List of (text, page_num, chapter_title, subchapter_title) tuples.
+    Output: List of dictionaries.
     """
-    if not tokenizer:
-        print("ERROR: Tokenizer not provided to chunker.")
-        return []
-    if not sentences_structure:
-        print("Warning: No sentences provided to chunker.")
-        return []
+    if not tokenizer: print("ERROR: Tokenizer not provided."); return []
+    if not sentences_structure: print("Warning: No sentences provided."); return []
 
     chunks_data = []
-    current_chunk_texts = [] # Store only the text for the current chunk
-    current_chunk_pages = [] # Store page numbers for the current chunk
+    current_chunk_texts = [] # Stores only the actual text content for the chunk
+    current_chunk_pages = [] # Stores page numbers for context if needed
     current_chunk_tokens = 0
     # --- State Variables ---
-    current_chapter = "Introduction / Front Matter" # Start with a default
+    current_chapter = "Unknown Chapter / Front Matter" # Default chapter name
     current_subchapter = None
 
-    for i, (text, page_num, detected_ch_title, detected_sub_title) in enumerate(sentences_structure):
-
-        # --- Handle Detected Headings ---
-        # If it's a new CHAPTER heading (already appended as its own item):
-        if detected_ch_title is not None:
-            # 1. Finalize the PREVIOUS chunk if it exists
-            if current_chunk_texts:
-                chunk_text_joined = " ".join(current_chunk_texts).strip()
-                start_page = current_chunk_pages[0] if current_chunk_pages else page_num # Page of first sentence
-                if chunk_text_joined: # Ensure chunk isn't just whitespace
-                    chunks_data.append({
-                        "chunk_text": chunk_text_joined,
-                        "page_number": start_page,
-                        "chapter_title": current_chapter,
-                        "subchapter_title": current_subchapter
-                    })
-            # 2. Update state for the *next* chunks
-            current_chapter = detected_ch_title
-            current_subchapter = None # Reset subchapter
-            # 3. Reset current chunk - heading itself isn't part of content chunks
-            current_chunk_texts = []
-            current_chunk_pages = []
-            current_chunk_tokens = 0
-            continue # Move to next item, don't process heading as content
-
-        # If it's a new SUBCHAPTER heading:
-        if detected_sub_title is not None:
-             current_subchapter = detected_sub_title
-             # We'll include the subchapter text in the chunk, but don't force break yet
-             # Could add break logic here if desired
-
-        # --- Calculate tokens for the current text (sentence or subchapter heading) ---
-        sentence_tokens = len(tokenizer.encode(text))
-
-        # --- Check if adding this text exceeds target size ---
-        # If the chunk is not empty AND adding the new sentence would exceed the limit
-        if current_chunk_texts and (current_chunk_tokens + sentence_tokens > target_tokens):
-            # 1. Finalize the current chunk
+    # --- Helper function to finalize a chunk ---
+    def finalize_chunk():
+        nonlocal chunks_data, current_chunk_texts, current_chunk_pages, current_chunk_tokens, current_chapter, current_subchapter
+        if current_chunk_texts:
             chunk_text_joined = " ".join(current_chunk_texts).strip()
-            start_page = current_chunk_pages[0] # Page of first sentence
-            if chunk_text_joined:
+            start_page = current_chunk_pages[0] if current_chunk_pages else 0
+            if chunk_text_joined: # Avoid empty chunks
                 chunks_data.append({
                     "chunk_text": chunk_text_joined,
                     "page_number": start_page,
                     "chapter_title": current_chapter,
                     "subchapter_title": current_subchapter
                 })
+            # Reset for next chunk (important!)
+            current_chunk_texts = []
+            current_chunk_pages = []
+            current_chunk_tokens = 0
+
+    # --- Iterate through the structured data ---
+    for i, (text, page_num, detected_ch_title, detected_sub_title) in enumerate(sentences_structure):
+
+        # --- Handle Detected Headings ---
+        if detected_ch_title is not None:
+            # Finish the previous chunk *before* updating chapter state
+            finalize_chunk()
+            # Update chapter state and reset subchapter
+            current_chapter = detected_ch_title
+            current_subchapter = None
+            # print(f"--- CH DETECTED: {current_chapter} ---") # Debug
+            continue # Skip adding heading text to content chunks
+
+        if detected_sub_title is not None:
+             # Option 1: Finish previous chunk and start new one (like chapters)
+             # finalize_chunk()
+             # Option 2: Just update state and include heading in text (current implementation)
+            current_subchapter = detected_sub_title
+            # print(f"--- SUB DETECTED: {current_subchapter} ---") # Debug
+            # Fall through to treat it like normal text for chunking purposes
+
+        # --- Regular text processing ---
+        sentence_tokens = len(tokenizer.encode(text))
+
+        # --- Check if adding this text exceeds target size ---
+        # If chunk has content AND adding new text exceeds limit OR if text is too long itself
+        if current_chunk_texts and (current_chunk_tokens + sentence_tokens > target_tokens):
+            # 1. Finalize the current chunk
+            finalize_chunk()
 
             # 2. --- Overlap Logic ---
-            # Need the original tuples list index to backtrack for overlap
-            # This requires rethinking how we store `current_chunk_sentence_tuples`
-            # For simplicity, let's grab the last N *texts* and their *pages*
-            overlap_start_idx = max(0, len(current_chunk_texts) - overlap_sentences)
-            texts_for_overlap = current_chunk_texts[overlap_start_idx:]
-            pages_for_overlap = current_chunk_pages[overlap_start_idx:]
+            # Find the index in the original list corresponding to the start of the overlap
+            # This is tricky because we skipped headings. We need to search backward in the original list.
+            overlap_start_original_index = -1
+            sentences_counted_back = 0
+            for j in range(i - 1, -1, -1): # Iterate backwards from the sentence *before* the current one
+                prev_text, _, prev_ch, prev_sub = sentences_structure[j]
+                # Only count non-heading text towards overlap sentences
+                if prev_ch is None and prev_sub is None:
+                    sentences_counted_back += 1
+                    if sentences_counted_back >= overlap_sentences:
+                         overlap_start_original_index = j
+                         break
+            if overlap_start_original_index == -1: # If not enough sentences for overlap
+                overlap_start_original_index = max(0, i - overlap_sentences) # Fallback based on index
 
+            # 3. Start the new chunk with the overlap content
+            # Iterate from the calculated overlap start index up to (but not including) current index `i`
+            for k in range(overlap_start_original_index, i):
+                o_text, o_page, o_ch, o_sub = sentences_structure[k]
+                # Add only actual text (not chapter headings) to the new chunk's overlap
+                if o_ch is None: # Subchapter headings *are* included here currently
+                    o_tokens = len(tokenizer.encode(o_text))
+                    current_chunk_texts.append(o_text)
+                    current_chunk_pages.append(o_page)
+                    current_chunk_tokens += o_tokens
 
-            # 3. Start the new chunk with the overlap
-            current_chunk_texts = texts_for_overlap
-            current_chunk_pages = pages_for_overlap
-            current_chunk_tokens = sum(len(tokenizer.encode(s)) for s in texts_for_overlap)
 
             # 4. Add the current sentence/subheading (that caused overflow) to the new chunk
-            # Ensure it's not already in the overlap texts
-            if text not in current_chunk_texts:
-                current_chunk_texts.append(text)
-                current_chunk_pages.append(page_num)
-                current_chunk_tokens += sentence_tokens
+            current_chunk_texts.append(text)
+            current_chunk_pages.append(page_num)
+            current_chunk_tokens += sentence_tokens
 
         else:
             # --- Add current sentence/subheading to the current chunk ---
@@ -98,15 +106,6 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
             current_chunk_tokens += sentence_tokens
 
     # Add the very last chunk if it has content
-    if current_chunk_texts:
-        chunk_text_joined = " ".join(current_chunk_texts).strip()
-        start_page = current_chunk_pages[0] if current_chunk_pages else 1 # Default page
-        if chunk_text_joined:
-            chunks_data.append({
-                "chunk_text": chunk_text_joined,
-                "page_number": start_page,
-                "chapter_title": current_chapter, # Use the last known chapter/subchapter
-                "subchapter_title": current_subchapter
-            })
+    finalize_chunk()
 
     return chunks_data
