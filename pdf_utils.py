@@ -1,8 +1,6 @@
-# Enhanced heading detection with better handling for centered italic chapter titles
 import fitz
 import re
 import nltk
-import statistics
 import streamlit as st
 
 # --- NLTK Download Logic ---
@@ -39,7 +37,8 @@ def get_dominant_font_stats(page):
     except Exception as e:
         print(f"Warning: Error getting font stats: {e}")
         return None, None
-    if not sizes: return None, None
+    if not sizes:
+        return None, None
     try:
         dominant_size = max(sizes, key=sizes.get)
         return dominant_size, None
@@ -50,18 +49,27 @@ def get_dominant_font_stats(page):
 # --- Metadata/Footer Check ---
 def is_likely_metadata_or_footer(line):
     line = line.strip()
-    if not line: return True
+    if not line:
+        return True
     cleaned_line = re.sub(r"^\W+|\W+$", "", line)
-    if cleaned_line.isdigit() and line == cleaned_line and len(cleaned_line) < 4: return True
+    if cleaned_line.isdigit() and line == cleaned_line and len(cleaned_line) < 4:
+        return True
     if "www." in line or ".com" in line or "@" in line or "books" in line.lower() or "global" in line.lower() or ("center" in line.lower() and "peace" in line.lower()):
-        if len(line.split()) < 10: return True
-    if re.match(r"^\s*Page\s+\d+\s*$", line, re.IGNORECASE): return True
-    if "©" in line or "copyright" in line.lower() or "first published" in line.lower() or "isbn" in line.lower(): return True
-    if "printed in" in line.lower(): return True
-    if any(loc in line.lower() for loc in ["nizamuddin", "new delhi", "noida", "bensalem", "byberry road"]): return True
-    if len(set(line.strip())) < 4 and len(line.strip()) > 4: return True
+        if len(line.split()) < 10:
+            return True
+    if re.match(r"^\s*Page\s+\d+\s*$", line, re.IGNORECASE):
+        return True
+    if "©" in line or "copyright" in line.lower() or "first published" in line.lower() or "isbn" in line.lower():
+        return True
+    if "printed in" in line.lower():
+        return True
+    if any(loc in line.lower() for loc in ["nizamuddin", "new delhi", "noida", "bensalem", "byberry road"]):
+        return True
+    if len(set(line.strip())) < 4 and len(line.strip()) > 4:
+        return True
     if line.endswith(cleaned_line) and cleaned_line.isdigit() and len(line) < 80 and len(line) > len(cleaned_line) + 2:
-        if not re.search(r"[a-zA-Z]{4,}", line): return True
+        if not re.search(r"[a-zA-Z]{4,}", line):
+            return True
     return False
 
 # --- Heading Detection Heuristic ---
@@ -70,8 +78,10 @@ def check_heading_heuristics(line_dict, page_width, dominant_font_size, current_
     words = line_text.split()
     num_words = len(words)
 
-    if not line_text or num_words == 0: return None, None
-    if is_likely_metadata_or_footer(line_text): return None, None
+    if not line_text or num_words == 0:
+        return None, None
+    if is_likely_metadata_or_footer(line_text):
+        return None, None
 
     max_line_size = 0
     min_line_size = 1000
@@ -81,7 +91,8 @@ def check_heading_heuristics(line_dict, page_width, dominant_font_size, current_
 
     try:
         valid_spans = [s for s in line_dict["spans"] if s['size'] > 5 and s['text'].strip()]
-        if not valid_spans: return None, None
+        if not valid_spans:
+            return None, None
 
         sizes_in_line = [s["size"] for s in valid_spans]
         max_line_size = round(max(sizes_in_line), 1)
@@ -92,8 +103,10 @@ def check_heading_heuristics(line_dict, page_width, dominant_font_size, current_
             span_len = len(s['text'].strip())
             total_chars += span_len
             flags = s.get('flags', 0)
-            if flags & 1: italic_chars += span_len
-            if flags & 4: bold_chars += span_len
+            if flags & 1:
+                italic_chars += span_len
+            if flags & 4:
+                bold_chars += span_len
 
     except Exception:
         return None, None
@@ -134,3 +147,60 @@ def check_heading_heuristics(line_dict, page_width, dominant_font_size, current_
         return ('subchapter', line_text) if current_chapter_title else ('chapter', line_text)
 
     return None, None
+
+# --- Main Extraction Function ---
+def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_skip=0, start_page_offset=1):
+    doc = None
+    extracted_data = []
+    current_chapter_title_state = None
+    dominant_body_size = 10
+
+    try:
+        doc = fitz.open(stream=uploaded_file_content, filetype="pdf")
+        total_pages = len(doc)
+
+        try:
+            all_sizes_counts = {}
+            scan_limit = total_pages - end_skip
+            scan_start = start_skip
+            max_scan_pages = 15
+            for i in range(scan_start, min(scan_limit, scan_start + max_scan_pages)):
+                page = doc[i]
+                blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT)["blocks"]
+                for b in blocks:
+                    if b['type'] == 0:
+                        for l in b["lines"]:
+                            line_text = "".join(s["text"] for s in l["spans"]).strip()
+                            if is_likely_metadata_or_footer(line_text):
+                                continue
+                            for s in l["spans"]:
+                                text = s["text"].strip()
+                                if text and 'size' in s and s['size'] > 5:
+                                    size = round(s["size"], 1)
+                                    all_sizes_counts[size] = all_sizes_counts.get(size, 0) + len(text)
+            if all_sizes_counts:
+                dominant_body_size = max(all_sizes_counts, key=all_sizes_counts.get)
+        except Exception as e:
+            print(f"Font Pre-scan Warning: {e}")
+
+        for page_num_0based, page in enumerate(doc):
+            if page_num_0based < start_skip:
+                continue
+            if page_num_0based >= total_pages - end_skip:
+                break
+            adjusted_page_num = page_num_0based - start_skip + start_page_offset
+            page_width = page.rect.width
+
+            try:
+                blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT | fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+                for b in blocks:
+                    if b['type'] == 0:
+                        for l in b["lines"]:
+                            line_text = "".join(s["text"] for s in l["spans"]).strip()
+                            if not line_text or is_likely_metadata_or_footer(line_text):
+                                continue
+
+                            heading_type, heading_text = check_heading_heuristics(
+                                l,
+                                page_width,
+                                dominant
