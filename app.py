@@ -4,7 +4,9 @@ import tiktoken
 import time
 
 # Import functions from our modules
+
 from pdf_utils import extract_sentences_with_structure, download_nltk_data
+
 from chunker import chunk_structured_sentences
 
 # --- Constants ---
