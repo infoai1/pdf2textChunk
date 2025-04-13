@@ -1,11 +1,12 @@
 import fitz
 import re
 import nltk
+import statistics
 import streamlit as st
 
 # --- NLTK Download Logic ---
-# (Keep the download_nltk_data function as is from previous versions)
 def download_nltk_data(resource_name, resource_path):
+    # ...(keep as is)...
     try:
         nltk.data.find(resource_path)
     except LookupError:
@@ -22,10 +23,9 @@ def download_nltk_data(resource_name, resource_path):
         return False
     return True
 
-
 # --- Metadata/Footer Check ---
 def is_likely_metadata_or_footer(line):
-    # (Keep this function as is from previous version - you might need to tune it further)
+     # ...(keep as is)...
     line = line.strip()
     if not line: return True
     cleaned_line = re.sub(r"^\W+|\W+$", "", line)
@@ -41,58 +41,64 @@ def is_likely_metadata_or_footer(line):
          if not re.search(r"[a-zA-Z]{4,}", line): return True
     return False
 
-# --- Simplified Heading Detection ---
-def check_heading_heuristics_simple(line_text, first_span_font, is_line_mostly_styled, current_chapter_title):
+# --- Simplified Heading Checker with Line Break Context ---
+def check_heading_heuristics_simple(
+    line_text,
+    first_span_font, # Font name from first span (approximate style)
+    is_centered_hint, # Boolean hint about centering
+    prev_line_ended_break, # Did the previous block end with \n?
+    next_line_starts_break, # Does the next block start after a gap?
+    current_chapter_title
+    ):
     """
-    Simpler heuristic focusing on keywords, style hints in font name, case, and length.
-    Returns ('chapter', text), ('subchapter', text), or (None, None).
+    Simplified heuristic focusing on keywords, style hints, case, length, AND line breaks/centering.
     """
     line_text = line_text.strip()
     words = line_text.split()
     num_words = len(words)
 
-    if not line_text: return None, None
+    if not line_text or num_words == 0: return None, None
+    if is_likely_metadata_or_footer(line_text): return None, None
 
-    # Style hints from font name
     is_italic_hint = "italic" in first_span_font.lower()
     is_bold_hint = "bold" in first_span_font.lower()
+    is_short_line = num_words < 10
+    is_title_case = line_text.istitle()
 
     # --- Rule Prioritization ---
 
     # 1. Explicit Chapter Keywords (High Confidence)
     if re.match(r"^\s*(CHAPTER|SECTION|PART)\s+[IVXLCDM\d]+", line_text, re.IGNORECASE) and num_words < 8:
-        # print(f"✅ CH (Keyword): {line_text}")
         return 'chapter', line_text
 
-    # 2. Style (Italic/Bold from font name) + Title Case + Short Length
-    # This seems key for your examples like "The Creation Plan of God"
-    if (is_italic_hint or is_bold_hint or is_line_mostly_styled) and line_text.istitle() and 1 < num_words < 8:
-         # print(f"✅ CH (Style+Case+Len): {line_text}")
-         return 'chapter', line_text
+    # 2. Surrounded by Breaks + Centered + Short + Styled/Title Case (Very High Confidence Chapter)
+    if prev_line_ended_break and next_line_starts_break and is_centered_hint and is_short_line:
+        if is_italic_hint or is_bold_hint or is_title_case:
+             # print(f"✅ CH (Breaks+Center+Style/Case): {line_text}")
+             return 'chapter', line_text
 
-    # 3. Other Title Case Lines (Maybe Subchapters if context exists)
-    if line_text.istitle() and 1 < num_words < 12:
-         if not line_text[-1] in ['.', '?', '!', ':', ',', ';']: # Avoid ending punctuation
-              if current_chapter_title: # If inside a chapter, guess subchapter
-                   # print(f"✅ SUB (Case+Len): {line_text}")
+    # 3. Surrounded by Breaks + Short + Styled/Title Case (High Confidence Chapter)
+    if prev_line_ended_break and next_line_starts_break and is_short_line:
+        if is_italic_hint or is_bold_hint or is_title_case:
+            # print(f"✅ CH (Breaks+Style/Case): {line_text}")
+            return 'chapter', line_text
+
+    # 4. Numbered list items (Treat as chapter for now)
+    if re.match(r"^\s*[IVXLCDM]+\.?\s+.{3,}", line_text) and num_words < 10: return 'chapter', line_text
+    if re.match(r"^\s*\d+\.?\s+[A-Z].{2,}", line_text) and num_words < 8: return 'chapter', line_text
+
+    # 5. Other Title Case / Styled lines (Maybe Subchapter?)
+    if (is_italic_hint or is_bold_hint or is_title_case) and 1 < num_words < 12:
+         if not line_text[-1] in ['.', '?', '!', ':', ',', ';']:
+              if current_chapter_title: # Only if inside a chapter
+                   # print(f"✅ SUB (Style/Case Fallback): {line_text}")
                    return 'subchapter', line_text
-              else: # Otherwise, might be an early chapter title missed by other rules
-                   # print(f"✅ CH (Case+Len Fallback): {line_text}")
-                   return 'chapter', line_text
-
-
-    # 4. Numbered list items (Roman/Decimal) - Treat as chapter for now
-    if re.match(r"^\s*[IVXLCDM]+\.?\s+.{3,}", line_text) and num_words < 10:
-         # print(f"✅ CH (Roman): {line_text}")
-         return 'chapter', line_text
-    if re.match(r"^\s*\d+\.?\s+[A-Z].{2,}", line_text) and num_words < 8:
-         # print(f"✅ CH (Decimal): {line_text}")
-         return 'chapter', line_text
+              # else: could be an early chapter missed, but let's be stricter
 
     return None, None # Default: Not a heading
 
 
-# --- Main Extraction Function (Using get_text("blocks")) ---
+# --- Main Extraction Function (Using get_text("blocks") for line breaks) ---
 def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_skip=0, start_page_offset=1):
     doc = None
     extracted_data = []
@@ -102,67 +108,89 @@ def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_sk
         doc = fitz.open(stream=uploaded_file_content, filetype="pdf")
         total_pages = len(doc)
 
+        all_lines_data = [] # Store tuples: (line_text, page_num, first_span_font, line_bbox, page_width)
+
+        # --- Pass 1: Extract all lines with basic info ---
+        print("Pass 1: Extracting lines and basic info...")
         for page_num_0based, page in enumerate(doc):
             if page_num_0based < start_skip: continue
             if page_num_0based >= total_pages - end_skip: break
             adjusted_page_num = page_num_0based - start_skip + start_page_offset
+            page_width = page.rect.width
 
             try:
-                # Using "blocks" is generally robust and gives basic line structure + font info per span
-                blocks = page.get_text("blocks", sort=True) # [[x0, y0, x1, y1, "text...", block_no, block_type], ...] block_type 0 = text
-
+                # Use 'dict' to get detailed span info needed for font style approximation
+                blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT | fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
                 for b in blocks:
-                    block_text_lines = b[4].split('\n') # Text is the 5th element (index 4)
-                    # We process line by line within a block
-                    for line_text in block_text_lines:
-                        line_text_cleaned = line_text.strip()
-                        if not line_text_cleaned or is_likely_metadata_or_footer(line_text_cleaned):
-                            continue
+                    if b['type'] == 0: # Text block
+                        for l in b["lines"]:
+                            line_text = "".join(s["text"] for s in l["spans"]).strip()
+                            if not line_text or is_likely_metadata_or_footer(line_text):
+                                continue
 
-                        # --- Get Font Info for the first span of this logical line ---
-                        # This is an approximation; a line from get_text("blocks") might merge multiple formats.
-                        # A more precise way needs get_text("dict") again, but let's try simple first.
-                        first_span_font = "Unknown"
-                        is_line_mostly_styled = False # Placeholder - can't easily get detailed flags here
-                        try:
-                            # We don't have easy access to spans here, so font/style check is limited
-                            # Can we infer from block properties? Sometimes font info is in block dict if uniform.
-                            # Let's rely more on case/length/keywords for now with get_text("blocks")
-                             pass # Cannot easily get span data from "blocks" output directly here
-                        except Exception:
-                             pass
-
-
-                        # --- Check Heading ---
-                        heading_type, heading_text = check_heading_heuristics_simple(
-                            line_text_cleaned,
-                            first_span_font, # Pass basic font name if available
-                            is_line_mostly_styled, # Pass basic style info if available
-                            current_chapter_title_state
-                        )
-
-                        is_heading = heading_type is not None
-
-                        if heading_type == 'chapter':
-                            current_chapter_title_state = heading_text
-                            extracted_data.append((heading_text, adjusted_page_num, heading_text, None))
-                        elif heading_type == 'subchapter':
-                            extracted_data.append((heading_text, adjusted_page_num, None, heading_text))
-                        else: # Regular text
-                            try:
-                                sentences_in_line = nltk.sent_tokenize(line_text_cleaned)
-                                for sentence in sentences_in_line:
-                                    sentence_clean = sentence.strip()
-                                    if sentence_clean:
-                                        extracted_data.append((sentence_clean, adjusted_page_num, None, None))
-                            except Exception as e_nltk:
-                                st.warning(f"NLTK Error (Page {adjusted_page_num}): Line '{line_text_cleaned}'. Error: {e_nltk}")
-                                if line_text_cleaned:
-                                    extracted_data.append((line_text_cleaned, adjusted_page_num, None, None))
+                            first_span_font = l["spans"][0]['font'] if l["spans"] else "Unknown"
+                            line_bbox = l.get('bbox', None)
+                            all_lines_data.append((line_text, adjusted_page_num, first_span_font, line_bbox, page_width))
 
             except Exception as e_page:
-                 st.error(f"Processing Error: Failed to process page {adjusted_page_num}. Error: {e_page}")
+                 st.error(f"Extraction Error: Failed during initial text extraction on page {adjusted_page_num}. Error: {e_page}")
                  continue
+
+        # --- Pass 2: Process lines with context (line breaks, centering) ---
+        print(f"Pass 2: Analyzing {len(all_lines_data)} extracted lines for structure...")
+        for i, (line_text, page_num, first_span_font, line_bbox, page_width) in enumerate(all_lines_data):
+
+             # Check context: Did previous line end with a break? Does next line start after a break?
+             # This is approximated by checking if the line is the *first* line in its block
+             # A more robust way would involve checking y-coordinates if using get_text("dict") blocks
+             # For simplicity with get_text("blocks"), we assume block separation implies breaks.
+             # This IS an approximation.
+             prev_line_ended_break = (i == 0) or (all_lines_data[i-1][1] != page_num) # Break if previous line was on diff page
+             next_line_starts_break = (i == len(all_lines_data) - 1) or (all_lines_data[i+1][1] != page_num) # Break if next line is on diff page
+             # TODO: Improve break detection using block info or y-coordinates if needed
+
+             # Basic Centering Check
+             is_centered_hint = False
+             if line_bbox and page_width > 0:
+                 left_margin = line_bbox[0]
+                 right_margin = page_width - line_bbox[2]
+                 if abs(left_margin - right_margin) < (page_width * 0.15) and left_margin > (page_width * 0.15):
+                     is_centered_hint = True
+
+             # --- Check Heading ---
+             heading_type, heading_text = check_heading_heuristics_simple(
+                 line_text,
+                 first_span_font,
+                 is_centered_hint,
+                 prev_line_ended_break,
+                 next_line_starts_break,
+                 current_chapter_title_state
+             )
+
+             is_heading = heading_type is not None
+
+             if heading_type == 'chapter':
+                 current_chapter_title_state = heading_text
+                 extracted_data.append((heading_text, adjusted_page_num, heading_text, None))
+             elif heading_type == 'subchapter':
+                  if current_chapter_title_state: # Ensure we are within a chapter
+                     extracted_data.append((heading_text, adjusted_page_num, None, heading_text))
+                  else: # Treat as text if no chapter context
+                      is_heading = False
+             else: # Regular text
+                 is_heading = False
+
+             if not is_heading:
+                 try:
+                     sentences_in_line = nltk.sent_tokenize(line_text)
+                     for sentence in sentences_in_line:
+                         sentence_clean = sentence.strip()
+                         if sentence_clean:
+                             extracted_data.append((sentence_clean, adjusted_page_num, None, None))
+                 except Exception as e_nltk:
+                     st.warning(f"NLTK Error (Page {adjusted_page_num}): Line '{line_text}'. Error: {e_nltk}")
+                     if line_text: extracted_data.append((line_text, adjusted_page_num, None, None))
+
 
         return extracted_data
 
