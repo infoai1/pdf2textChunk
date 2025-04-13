@@ -1,3 +1,4 @@
+
 import fitz
 import re
 import nltk
@@ -203,4 +204,35 @@ def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_sk
                             heading_type, heading_text = check_heading_heuristics(
                                 l,
                                 page_width,
-                                dominant
+                                dominant_body_size,
+                                current_chapter_title_state
+                            )
+
+                            if heading_type == 'chapter':
+                                current_chapter_title_state = heading_text
+                                extracted_data.append((heading_text, adjusted_page_num, heading_text, None))
+                            elif heading_type == 'subchapter':
+                                extracted_data.append((heading_text, adjusted_page_num, None, heading_text))
+                            else:
+                                try:
+                                    sentences = nltk.sent_tokenize(line_text)
+                                    for sentence in sentences:
+                                        sentence_clean = sentence.strip()
+                                        if sentence_clean:
+                                            extracted_data.append((sentence_clean, adjusted_page_num, None, None))
+                                except Exception as e_nltk:
+                                    st.warning(f"NLTK Error (Page {adjusted_page_num}): {e_nltk}")
+                                    if line_text:
+                                        extracted_data.append((line_text, adjusted_page_num, None, None))
+            except Exception as e_page:
+                st.error(f"Processing Error on page {adjusted_page_num}: {e_page}")
+                continue
+
+        return extracted_data
+
+    except Exception as e_main:
+        st.error(f"Main Extraction Error: {e_main}")
+        return None
+    finally:
+        if doc:
+            doc.close()
