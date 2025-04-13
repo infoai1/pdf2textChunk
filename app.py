@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import tik _ = sentences_structure[overlap_original_idx] # Overlap text doesn't need heading infotoken
+import tiktoken
 import time
 
 from pdf_utils import extract_sentences_with_structure, download_nltk_
