@@ -64,20 +64,22 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
            ((current_chunk_tokens + sentence_tokens > target_tokens and sentence_tokens < target_tokens) or sentence_tokens >= target_tokens):
             finalize_chunk()
 
-            # --- Overlap Logic ---
-            overlap_start_content_index = max(0, current_content_item_index - overlap_sentences)
-            for k in range(overlap_start_content_index, current_content_item_index):
-                 overlap_original_idx = content_indices[k]
-                 # Ensure index is valid before accessing
-                 if overlap_original_idx < len(sentences_structure):
-                     o_text, o_page, _, _ = sentences_structure[overlap_original_idx]
-                     o_tokens = len(tokenizer.encode(o_text))
-                     current_chunk_texts.append(o_text)
-                     current_chunk_pages.append(o_page)
-                     current_chunk_tokens += o_tokens
-                 else:
-                     print(f"Warning: Overlap index {overlap_original_idx} out of bounds.")
-            # --- End Overlap Logic ---
+                    # --- Overlap Logic ---
+        overlap_start_content_idx = max(0, current_content_item_index - overlap_sentences)
+        for k in range(overlap_start_content_idx, current_content_item_index):
+             overlap_original_idx = content_indices[k]
+             # Ensure index is valid before accessing
+             if overlap_original_idx < len(sentences_structure):
+                 o_text, o_page, _, _ = sentences_structure[overlap_original_idx]
+                 # --> Check indentation of this block carefully <--
+                 o_tokens = len(tokenizer.encode(o_text))
+                 current_chunk_texts.append(o_text)
+                 current_chunk_pages.append(o_page)
+                 current_chunk_tokens += o_tokens
+                 # --> End of block to check <--
+             else:
+                 print(f"Warning: Overlap index {overlap_original_idx} out of bounds.")
+        # --- End Overlap Logic ---
 
         # Add current text to the chunk (unless it was just used for overlap)
         # Need to ensure the current text isn't identical to the last appended text if overlap included it.
