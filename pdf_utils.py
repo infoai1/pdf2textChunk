@@ -1,12 +1,11 @@
 import fitz
 import re
 import nltk
-import statistics
 import streamlit as st
 
 # --- NLTK Download Logic ---
+# (Keep the download_nltk_data function as is from previous versions)
 def download_nltk_data(resource_name, resource_path):
-    # ... (Keep as is) ...
     try:
         nltk.data.find(resource_path)
     except LookupError:
@@ -24,34 +23,9 @@ def download_nltk_data(resource_name, resource_path):
     return True
 
 
-# --- Font Size Analysis ---
-def get_dominant_font_stats(page):
-    # ... (Keep as is) ...
-    sizes = {}
-    try:
-        blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT)["blocks"]
-        for b in blocks:
-            if b['type'] == 0:
-                for l in b["lines"]:
-                    for s in l["spans"]:
-                        text = s["text"].strip()
-                        if text and 'size' in s and s['size'] > 5:
-                            size = round(s["size"], 1)
-                            sizes[size] = sizes.get(size, 0) + len(text)
-    except Exception as e:
-        print(f"Warning: Error getting font stats: {e}")
-        return None, None
-    if not sizes: return None, None
-    try:
-        dominant_size = max(sizes, key=sizes.get)
-        return dominant_size, None
-    except Exception as e:
-        print(f"Warning: Error calculating dominant font stats: {e}")
-        return list(sizes.keys())[0] if sizes else None, None
-
 # --- Metadata/Footer Check ---
 def is_likely_metadata_or_footer(line):
-    # ... (Keep as is) ...
+    # (Keep this function as is from previous version - you might need to tune it further)
     line = line.strip()
     if not line: return True
     cleaned_line = re.sub(r"^\W+|\W+$", "", line)
@@ -67,141 +41,124 @@ def is_likely_metadata_or_footer(line):
          if not re.search(r"[a-zA-Z]{4,}", line): return True
     return False
 
-
-# --- Simplified Heading Checker ---
-def check_heading_heuristics_simple(line_dict, dominant_font_size, current_chapter_title):
+# --- Simplified Heading Detection ---
+def check_heading_heuristics_simple(line_text, first_span_font, is_line_mostly_styled, current_chapter_title):
     """
-    Simplified heuristic focusing on Italic/Bold flags, Title Case, and Length.
+    Simpler heuristic focusing on keywords, style hints in font name, case, and length.
     Returns ('chapter', text), ('subchapter', text), or (None, None).
-    Font size check is less emphasized here but can be added back if needed.
     """
-    line_text = "".join(s["text"] for s in line_dict["spans"]).strip()
+    line_text = line_text.strip()
     words = line_text.split()
     num_words = len(words)
 
-    if not line_text or num_words == 0: return None, None
-    if is_likely_metadata_or_footer(line_text): return None, None
+    if not line_text: return None, None
 
-    # --- Extract Style Flags ---
-    is_mostly_italic = False
-    is_mostly_bold = False
-    total_chars = 0
-    italic_chars = 0
-    bold_chars = 0
+    # Style hints from font name
+    is_italic_hint = "italic" in first_span_font.lower()
+    is_bold_hint = "bold" in first_span_font.lower()
 
-    try:
-        valid_spans = [s for s in line_dict["spans"] if s['text'].strip()]
-        if not valid_spans: return None, None
+    # --- Rule Prioritization ---
 
-        for s in valid_spans:
-            span_len = len(s['text'].strip())
-            total_chars += span_len
-            flags = s.get('flags', 0)
-            if flags & 1: italic_chars += span_len # Italic
-            if flags & 4: bold_chars += span_len # Bold
-
-        if total_chars > 0:
-            is_mostly_italic = (italic_chars / total_chars) > 0.6
-            is_mostly_bold = (bold_chars / total_chars) > 0.6
-
-    except Exception as e:
-        # print(f"Warning: Could not process flags for line '{line_text}': {e}")
-        pass # Continue without style info if flags error out
-
-    # --- Apply Rules ---
-
-    # Rule 1: Explicit Keywords (Highest Priority)
+    # 1. Explicit Chapter Keywords (High Confidence)
     if re.match(r"^\s*(CHAPTER|SECTION|PART)\s+[IVXLCDM\d]+", line_text, re.IGNORECASE) and num_words < 8:
+        # print(f"✅ CH (Keyword): {line_text}")
         return 'chapter', line_text
 
-    # Rule 2: Italic/Bold + Title Case + Short = Likely Chapter
-    # This matches the visual style of the examples provided
-    if (is_mostly_italic or is_mostly_bold) and line_text.istitle() and 1 < num_words < 10:
-         if not line_text[-1] in ['.', '?', '!', ':', ',', ';']:
-             return 'chapter', line_text
+    # 2. Style (Italic/Bold from font name) + Title Case + Short Length
+    # This seems key for your examples like "The Creation Plan of God"
+    if (is_italic_hint or is_bold_hint or is_line_mostly_styled) and line_text.istitle() and 1 < num_words < 8:
+         # print(f"✅ CH (Style+Case+Len): {line_text}")
+         return 'chapter', line_text
 
-    # Rule 3: Title Case + Short (No Style) = Maybe Subchapter? (Lower confidence)
+    # 3. Other Title Case Lines (Maybe Subchapters if context exists)
     if line_text.istitle() and 1 < num_words < 12:
-         if not line_text[-1] in ['.', '?', '!', ':', ',', ';']:
-              if current_chapter_title: # Only guess subchapter if we are in a chapter
+         if not line_text[-1] in ['.', '?', '!', ':', ',', ';']: # Avoid ending punctuation
+              if current_chapter_title: # If inside a chapter, guess subchapter
+                   # print(f"✅ SUB (Case+Len): {line_text}")
                    return 'subchapter', line_text
-              # else: Might be a chapter title missed above, could return 'chapter' as fallback
-
-    # Rule 4: Numbered List like items - treat as chapter for now
-    if re.match(r"^\s*[IVXLCDM]+\.?\s+.{3,}", line_text) and num_words < 10: return 'chapter', line_text
-    if re.match(r"^\s*\d+\.?\s+[A-Z].{2,}", line_text) and num_words < 8: return 'chapter', line_text
+              else: # Otherwise, might be an early chapter title missed by other rules
+                   # print(f"✅ CH (Case+Len Fallback): {line_text}")
+                   return 'chapter', line_text
 
 
-    return None, None # Not detected as heading
+    # 4. Numbered list items (Roman/Decimal) - Treat as chapter for now
+    if re.match(r"^\s*[IVXLCDM]+\.?\s+.{3,}", line_text) and num_words < 10:
+         # print(f"✅ CH (Roman): {line_text}")
+         return 'chapter', line_text
+    if re.match(r"^\s*\d+\.?\s+[A-Z].{2,}", line_text) and num_words < 8:
+         # print(f"✅ CH (Decimal): {line_text}")
+         return 'chapter', line_text
+
+    return None, None # Default: Not a heading
 
 
-# --- Main Extraction Function ---
+# --- Main Extraction Function (Using get_text("blocks")) ---
 def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_skip=0, start_page_offset=1):
     doc = None
     extracted_data = []
     current_chapter_title_state = None
-    dominant_body_size = 10 # Default fallback (less critical now)
 
     try:
         doc = fitz.open(stream=uploaded_file_content, filetype="pdf")
         total_pages = len(doc)
 
-        # Optional: Font Pre-scan (can keep it to print the dominant size for info)
-        try:
-            all_sizes_counts = {}
-            scan_limit = total_pages - end_skip; scan_start = start_skip; max_scan_pages = 15
-            for i in range(scan_start, min(scan_limit, scan_start + max_scan_pages)):
-                page = doc[i]; blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT)["blocks"]
-                for b in blocks:
-                    if b['type'] == 0:
-                        for l in b["lines"]:
-                            for s in l["spans"]:
-                                text = s["text"].strip(); size = round(s.get("size", 0), 1)
-                                if text and size > 5: all_sizes_counts[size] = all_sizes_counts.get(size, 0) + len(text)
-            if all_sizes_counts: dominant_body_size = max(all_sizes_counts, key=all_sizes_counts.get)
-            print(f"--- Dominant body font size (estimated): {dominant_body_size} ---")
-        except Exception as e: print(f"--- Font Pre-scan Warning: {e}. Using default {dominant_body_size}. ---")
-
-        # --- Main Page Processing Loop ---
         for page_num_0based, page in enumerate(doc):
             if page_num_0based < start_skip: continue
             if page_num_0based >= total_pages - end_skip: break
             adjusted_page_num = page_num_0based - start_skip + start_page_offset
 
             try:
-                blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT | fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+                # Using "blocks" is generally robust and gives basic line structure + font info per span
+                blocks = page.get_text("blocks", sort=True) # [[x0, y0, x1, y1, "text...", block_no, block_type], ...] block_type 0 = text
+
                 for b in blocks:
-                    if b['type'] == 0: # Text block
-                        for l in b["lines"]:
-                            line_dict = l # Pass the whole line dictionary
-                            line_text = "".join(s["text"] for s in l["spans"]).strip()
+                    block_text_lines = b[4].split('\n') # Text is the 5th element (index 4)
+                    # We process line by line within a block
+                    for line_text in block_text_lines:
+                        line_text_cleaned = line_text.strip()
+                        if not line_text_cleaned or is_likely_metadata_or_footer(line_text_cleaned):
+                            continue
 
-                            if not line_text or is_likely_metadata_or_footer(line_text): continue
+                        # --- Get Font Info for the first span of this logical line ---
+                        # This is an approximation; a line from get_text("blocks") might merge multiple formats.
+                        # A more precise way needs get_text("dict") again, but let's try simple first.
+                        first_span_font = "Unknown"
+                        is_line_mostly_styled = False # Placeholder - can't easily get detailed flags here
+                        try:
+                            # We don't have easy access to spans here, so font/style check is limited
+                            # Can we infer from block properties? Sometimes font info is in block dict if uniform.
+                            # Let's rely more on case/length/keywords for now with get_text("blocks")
+                             pass # Cannot easily get span data from "blocks" output directly here
+                        except Exception:
+                             pass
 
-                            # --- Use Simplified Heading Checker ---
-                            heading_type, heading_text = check_heading_heuristics_simple(
-                                line_dict, # Pass the line dictionary
-                                dominant_body_size, # Still needed if font rules are used
-                                current_chapter_title_state
-                            )
 
-                            is_heading = heading_type is not None
+                        # --- Check Heading ---
+                        heading_type, heading_text = check_heading_heuristics_simple(
+                            line_text_cleaned,
+                            first_span_font, # Pass basic font name if available
+                            is_line_mostly_styled, # Pass basic style info if available
+                            current_chapter_title_state
+                        )
 
-                            if heading_type == 'chapter':
-                                current_chapter_title_state = heading_text
-                                extracted_data.append((heading_text, adjusted_page_num, heading_text, None))
-                            elif heading_type == 'subchapter':
-                                extracted_data.append((heading_text, adjusted_page_num, None, heading_text))
-                            else: # Regular text
-                                try:
-                                    sentences_in_line = nltk.sent_tokenize(line_text)
-                                    for sentence in sentences_in_line:
-                                        sentence_clean = sentence.strip()
-                                        if sentence_clean:
-                                            extracted_data.append((sentence_clean, adjusted_page_num, None, None))
-                                except Exception as e_nltk:
-                                    st.warning(f"NLTK Error (Page {adjusted_page_num}): Line '{line_text}'. Error: {e_nltk}")
-                                    if line_text: extracted_data.append((line_text, adjusted_page_num, None, None))
+                        is_heading = heading_type is not None
+
+                        if heading_type == 'chapter':
+                            current_chapter_title_state = heading_text
+                            extracted_data.append((heading_text, adjusted_page_num, heading_text, None))
+                        elif heading_type == 'subchapter':
+                            extracted_data.append((heading_text, adjusted_page_num, None, heading_text))
+                        else: # Regular text
+                            try:
+                                sentences_in_line = nltk.sent_tokenize(line_text_cleaned)
+                                for sentence in sentences_in_line:
+                                    sentence_clean = sentence.strip()
+                                    if sentence_clean:
+                                        extracted_data.append((sentence_clean, adjusted_page_num, None, None))
+                            except Exception as e_nltk:
+                                st.warning(f"NLTK Error (Page {adjusted_page_num}): Line '{line_text_cleaned}'. Error: {e_nltk}")
+                                if line_text_cleaned:
+                                    extracted_data.append((line_text_cleaned, adjusted_page_num, None, None))
 
             except Exception as e_page:
                  st.error(f"Processing Error: Failed to process page {adjusted_page_num}. Error: {e_page}")
