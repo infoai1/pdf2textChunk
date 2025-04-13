@@ -45,75 +45,28 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
     current_content_item_index = 0 # Track position within content_indices
 
     # --- Main Loop over Content Items --- (Indentation Level 0)
-    while current_content_item_index < len(content_indices):
-        # Indentation Level 1
-        original_list_index = content_indices[current_content_item_index]
+  # --- Simplified Main Loop for Debugging --- (Replace the original while loop)
+while current_content_item_index < len(content_indices):
+    # Indentation Level 1
+    original_list_index = content_indices[current_content_item_index]
+    text, page_num, _, _ = sentences_structure[original_list_index] # Get text
 
-        # --- Update Chapter/Subchapter State before processing content item ---
-        temp_chapter = current_chapter
-        temp_subchapter = current_subchapter # Start with previous state for subchapter
-        found_sub_after_last_chap = False
-        for j in range(original_list_index, -1, -1):
-            # Indentation Level 2
-            _, _, ch_title_lookup, sub_title_lookup = sentences_structure[j]
-            if ch_title_lookup is not None:
-                # Indentation Level 3
-                temp_chapter = ch_title_lookup
-                if not found_sub_after_last_chap: temp_subchapter = None
-                break # Stop searching back
-            if sub_title_lookup is not None and not found_sub_after_last_chap:
-                 # Indentation Level 3
-                 temp_subchapter = sub_title_lookup
-                 found_sub_after_last_chap = True
+    # --- Minimal processing ---
+    try: # Add try-except around the suspected line
+        tokens_dummy = len(tokenizer.encode(text)) # Test encoding the text
+        print(f"Processing item {current_content_item_index}, Text: '{text[:50]}...'") # Print progress
+    except Exception as e:
+        print(f"Error encoding text at index {current_content_item_index}: {e}")
 
-        # Check if state actually changed *before* this content item
-        if temp_chapter != current_chapter:
-            # Indentation Level 2
-             finalize_chunk() # Finalize chunk under old chapter
-             current_chapter = temp_chapter
-             current_subchapter = temp_subchapter # This subchapter belongs to the new chapter
-        elif temp_subchapter != current_subchapter:
-            # Indentation Level 2
-             # If only subchapter changed, update state but don't necessarily finalize chunk unless needed by size
-             current_subchapter = temp_subchapter
+    # --- VERY simple chunking - just add the item (ignore size/overlap for now) ---
+    current_chunk_texts.append(text)
+    current_chunk_pages.append(page_num)
+    # Finalize chunk immediately for testing? Or after loop? Let's finalize after loop.
 
-        # --- Process the actual content item --- (Still Level 1)
-        text, page_num, _, _ = sentences_structure[original_list_index] # Ignore heading info retrieved here
+    current_content_item_index += 1 # Move to the next content item (Still Level 1)
 
-        sentence_tokens = len(tokenizer.encode(text))
+# Finalize the very last chunk (Indentation Level 0)
+finalize_chunk()
+# --- End Simplified Loop ---
 
-        # Check for chunk boundary
-        if current_chunk_texts and \
-           ((current_chunk_tokens + sentence_tokens > target_tokens and sentence_tokens < target_tokens*0.8) or sentence_tokens >= target_tokens*1.5):
-            # Indentation Level 2
-            finalize_chunk() # Finalize the previous chunk
-
-            # --- Overlap Logic ---
-            overlap_start_content_idx = max(0, current_content_item_index - overlap_sentences)
-            for k in range(overlap_start_content_idx, current_content_item_index):
-                # Indentation Level 3
-                overlap_original_idx = content_indices[k]
-                if overlap_original_idx < len(sentences_structure):
-                    # Indentation Level 4
-                    o_text, o_page, _, _ = sentences_structure[overlap_original_idx]
-                    o_tokens = len(tokenizer.encode(o_text)) # <--- THIS IS THE LINE FROM THE ERROR
-                    current_chunk_texts.append(o_text)
-                    current_chunk_pages.append(o_page)
-                    current_chunk_tokens += o_tokens
-                else:
-                    # Indentation Level 4
-                    print(f"Warning: Overlap index {overlap_original_idx} out of bounds.")
-            # --- End Overlap Logic ---
-
-        # Add current text to the chunk (Still Level 1)
-        current_chunk_texts.append(text)
-        current_chunk_pages.append(page_num)
-        current_chunk_tokens += sentence_tokens
-
-        current_content_item_index += 1 # Move to the next content item (Still Level 1)
-
-    # Finalize the very last chunk (Indentation Level 0)
-    finalize_chunk()
-
-    return chunks_data
-# --- END OF FILE chunker.py ---
+return chunks_data # Make sure this return is outside the loop
