@@ -1,12 +1,7 @@
 import tiktoken
 
 def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, overlap_sentences):
-    """
-    Chunks sentences provided as structured tuples, respecting chapters
-    and associating chapter/subchapter titles.
-    Input: List of (text, page_num, chapter_title, subchapter_title) tuples.
-    Output: List of dictionaries.
-    """
+    """Chunks sentences, respecting chapters and associating titles."""
     if not tokenizer: print("ERROR: Tokenizer not provided."); return []
     if not sentences_structure: print("Warning: No sentences provided."); return []
 
@@ -17,10 +12,13 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
     current_chapter = "Unknown Chapter / Front Matter"
     current_subchapter = None
 
+    # Store original indices of *content* items only (not chapter headings)
+    content_indices = [i for i, (_, _, ch, _) in enumerate(sentences_structure) if ch is None]
+
     def finalize_chunk():
         nonlocal chunks_data, current_chunk_texts, current_chunk_pages, current_chunk_tokens, current_chapter, current_subchapter
         if current_chunk_texts:
-            chunk_text_joined = " ".join(current_chunk_texts).strip() # Ensure stripped
+            chunk_text_joined = " ".join(current_chunk_texts).strip()
             start_page = current_chunk_pages[0] if current_chunk_pages else 0
             if chunk_text_joined:
                 chunks_data.append({
@@ -33,25 +31,16 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
             current_chunk_pages = []
             current_chunk_tokens = 0
 
-    original_indices_map = {idx: (data[0], data[1], data[2], data[3]) for idx, data in enumerate(sentences_structure)}
-    current_original_idx = 0
+    current_content_item_index = 0 # Track position within content_indices
 
-    while current_original_idx < len(sentences_structure):
-        text, page_num, detected_ch_title, detected_sub_title = sentences_structure[current_original_idx]
+    while current_content_item_index < len(content_indices):
+        original_list_index = content_indices[current_content_item_index]
+        text, page_num, _, detected_sub_title = sentences_structure[original_list_index] # Ignore chapter title here
 
-        is_chapter_heading = detected_ch_title is not None
-        is_subchapter_heading = detected_sub_title is not None
-
-        if is_chapter_heading:
-            finalize_chunk()
-            current_chapter = detected_ch_title
-            current_subchapter = None
-            current_original_idx += 1 # Move past the chapter heading line
-            continue
-
-        if is_subchapter_heading:
+        # Update subchapter if this line detected one
+        if detected_sub_title is not None:
             current_subchapter = detected_sub_title
-            # Subchapter heading text is included in the chunk below
+            # Treat the subheading text as content for the chunk
 
         sentence_tokens = len(tokenizer.encode(text))
 
@@ -59,41 +48,28 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
         if current_chunk_texts and (current_chunk_tokens + sentence_tokens > target_tokens):
             finalize_chunk()
 
-            # --- More Robust Overlap Logic ---
-            overlap_start_index = -1
-            sentences_to_overlap_count = 0
-            # Search backwards in the *original* list from the point *before* the current index
-            for j in range(current_original_idx - 1, -1, -1):
-                # Check if the item at index j was actual content (not a chapter heading)
-                if original_indices_map[j][2] is None: # It wasn't a chapter heading
-                    sentences_to_overlap_count += 1
-                    if sentences_to_overlap_count >= overlap_sentences:
-                        overlap_start_index = j
-                        break
-            # If not enough content sentences found, just take the last few items regardless
-            if overlap_start_index == -1:
-                 overlap_start_index = max(0, current_original_idx - overlap_sentences)
-
+            # --- Overlap Logic ---
+            # Find the index in the *content_indices* list for the start of the overlap
+            overlap_start_content_index = max(0, current_content_item_index - overlap_sentences)
+            
             # Add overlap sentences to the new chunk
-            for k in range(overlap_start_index, current_original_idx):
-                 o_text, o_page, o_ch, o_sub = original_indices_map[k]
-                 # Only add non-chapter headings to the new chunk's overlap
-                 if o_ch is None:
-                      o_tokens = len(tokenizer.encode(o_text))
-                      # Avoid adding duplicates if the loop includes the current text
-                      if k != current_original_idx:
-                          current_chunk_texts.append(o_text)
-                          current_chunk_pages.append(o_page)
-                          current_chunk_tokens += o_tokens
+            for k in range(overlap_start_content_index, current_content_item_index):
+                 overlap_original_idx = content_indices[k]
+                 o_text, o_page, _, o_sub = sentences_structure[overlap_original_idx]
+                 # Note: If the overlap includes a subchapter heading, its state effect (`current_subchapter`)
+                 # might be reapplied here based on the next iteration. This could be refined.
+                 o_tokens = len(tokenizer.encode(o_text))
+                 current_chunk_texts.append(o_text)
+                 current_chunk_pages.append(o_page)
+                 current_chunk_tokens += o_tokens
             # --- End Overlap Logic ---
-
 
         # Add current text (sentence or subchapter heading) to the chunk
         current_chunk_texts.append(text)
         current_chunk_pages.append(page_num)
         current_chunk_tokens += sentence_tokens
 
-        current_original_idx += 1 # Move to the next item in the original list
+        current_content_item_index += 1 # Move to the next content item
 
     finalize_chunk() # Add the last chunk
 
