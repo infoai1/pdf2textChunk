@@ -1,7 +1,12 @@
 import tiktoken
 
 def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, overlap_sentences):
-    """Chunks sentences, respecting chapters and associating titles."""
+    """
+    Chunks sentences provided as structured tuples, respecting chapters
+    and associating chapter/subchapter titles.
+    Input: List of (text, page_num, chapter_title, subchapter_title) tuples.
+    Output: List of dictionaries.
+    """
     if not tokenizer: print("ERROR: Tokenizer not provided."); return []
     if not sentences_structure: print("Warning: No sentences provided."); return []
 
@@ -13,6 +18,7 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
     current_subchapter = None
 
     # Store original indices of *content* items only (not chapter headings)
+    # Content includes regular sentences AND detected subchapter headings
     content_indices = [i for i, (_, _, ch, _) in enumerate(sentences_structure) if ch is None]
 
     def finalize_chunk():
@@ -35,29 +41,26 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
 
     while current_content_item_index < len(content_indices):
         original_list_index = content_indices[current_content_item_index]
-        text, page_num, _, detected_sub_title = sentences_structure[original_list_index] # Ignore chapter title here
+        # We get the state (chapter/subchapter) from the *previous* content item or initial state
+        # Get text, page, and detected subchapter title for the *current* content item
+        text, page_num, _, detected_sub_title = sentences_structure[original_list_index]
 
-        # Update subchapter if this line detected one
+        # Update current subchapter state *if* this line detected one
         if detected_sub_title is not None:
             current_subchapter = detected_sub_title
-            # Treat the subheading text as content for the chunk
 
+        # --- Calculate tokens for the current content item ---
         sentence_tokens = len(tokenizer.encode(text))
 
-        # Check for chunk boundary
-        if current_chunk_texts and (current_chunk_tokens + sentence_tokens > target_tokens):
-            finalize_chunk()
+        # --- Check if adding this item exceeds target size ---
+        if current_chunk_texts and (current_chunk_tokens + sentence_tokens > target_tokens) and sentence_tokens < target_tokens : # Avoid breaking on single long items
+            finalize_chunk() # Finalize the previous chunk
 
             # --- Overlap Logic ---
-            # Find the index in the *content_indices* list for the start of the overlap
-            overlap_start_content_index = max(0, current_content_item_index - overlap_sentences)
-            
-            # Add overlap sentences to the new chunk
-            for k in range(overlap_start_content_index, current_content_item_index):
+            overlap_start_content_idx = max(0, current_content_item_index - overlap_sentences)
+            for k in range(overlap_start_content_idx, current_content_item_index):
                  overlap_original_idx = content_indices[k]
-                 o_text, o_page, _, o_sub = sentences_structure[overlap_original_idx]
-                 # Note: If the overlap includes a subchapter heading, its state effect (`current_subchapter`)
-                 # might be reapplied here based on the next iteration. This could be refined.
+                 o_text, o_page, _, _ = sentences_structure[overlap_original_idx] # Overlap text doesn't need heading info
                  o_tokens = len(tokenizer.encode(o_text))
                  current_chunk_texts.append(o_text)
                  current_chunk_pages.append(o_page)
@@ -72,5 +75,17 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
         current_content_item_index += 1 # Move to the next content item
 
     finalize_chunk() # Add the last chunk
+
+    # Update chapter titles based on the first heading encountered in the original list
+    # This is a post-processing step to ensure chapters are assigned correctly
+    last_known_chapter = "Unknown Chapter / Front Matter"
+    for i, item in enumerate(sentences_structure):
+        _, _, ch_title, _ = item
+        if ch_title is not None:
+            last_known_chapter = ch_title
+            # Apply this chapter title to all subsequent chunks until the next chapter
+            # Find the index in chunks_data corresponding to this point
+            # This linking is complex; simpler to just use the state during chunk finalization
+            # The ffill in app.py handles this more practically for now.
 
     return chunks_data
