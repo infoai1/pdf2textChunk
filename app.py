@@ -12,19 +12,9 @@ TARGET_TOKENS = 200
 OVERLAP_SENTENCES = 2 # Number of sentences for overlap estimate
 
 # --- Ensure NLTK data is available ---
-# Use sidebar for setup messages
-# st.sidebar.title("Setup Status") # Use main area for status
-if 'nltk_checked' not in st.session_state:
-    st.session_state.nltk_checked = False
-if not st.session_state.nltk_checked:
-    with st.spinner("Checking NLTK data..."):
-        punkt_ready = download_nltk_data('punkt', 'tokenizers/punkt')
-        punkt_tab_ready = download_nltk_data('punkt_tab', 'tokenizers/punkt_tab')
-        if punkt_ready and punkt_tab_ready:
-            st.session_state.nltk_checked = True
-        else:
-             st.error("Failed to verify/download necessary NLTK data. App cannot proceed.")
-             st.stop() # Stop if NLTK data is not ready
+st.sidebar.title("Setup Status")
+punkt_ready = download_nltk_data('punkt', 'tokenizers/punkt')
+punkt_tab_ready = download_nltk_data('punkt_tab', 'tokenizers/punkt_tab')
 
 # --- Helper to get Tokenizer ---
 @st.cache_resource # Cache the tokenizer loading
@@ -37,7 +27,7 @@ def get_tokenizer():
         return None
 
 # --- Streamlit App UI ---
-st.title("PDF Structured Chunker v5 (with Page Skips)")
+st.title("PDF Structured Chunker v5 (with Page Skips & Font Analysis)")
 st.write("Upload a PDF, specify pages to skip and the starting page number, then process.")
 
 uploaded_file = st.file_uploader("1. Upload Book PDF", type="pdf", key="pdf_uploader_v5")
@@ -50,20 +40,24 @@ start_page_offset = st.sidebar.number_input("Actual Page # of FIRST Processed Pa
 # Get tokenizer instance
 tokenizer = get_tokenizer()
 
-if uploaded_file and tokenizer:
+if not tokenizer:
+    st.error("Tokenizer could not be loaded. Cannot proceed.")
+elif not (punkt_ready and punkt_tab_ready):
+     st.error("Essential NLTK data packages ('punkt', 'punkt_tab') could not be verified/downloaded. Cannot proceed.")
+elif uploaded_file:
     if st.button("Process PDF", key="chunk_button_v5"):
-        # Read file content only once
         pdf_content = uploaded_file.getvalue()
 
         st.info(f"Settings: Skip first {start_skip}, Skip last {end_skip}, Start numbering from page {start_page_offset}")
 
-        with st.spinner("Step 1: Reading PDF, cleaning, and extracting structured sentences..."):
+        with st.spinner("Step 1: Reading PDF, cleaning, analyzing fonts, and extracting structured sentences..."):
             start_time = time.time()
+            # Make sure parameters are passed correctly
             sentences_data = extract_sentences_with_structure(
                 pdf_content,
-                start_skip=start_skip,
-                end_skip=end_skip,
-                start_page_offset=start_page_offset # Pass the offset
+                start_skip=int(start_skip), # Ensure integers
+                end_skip=int(end_skip),
+                start_page_offset=int(start_page_offset)
             )
             extract_time = time.time() - start_time
             st.write(f"Extraction took: {extract_time:.2f} seconds")
@@ -89,29 +83,22 @@ if uploaded_file and tokenizer:
                 st.success(f"Text chunked into {len(chunk_list)} chunks.")
                 df = pd.DataFrame(chunk_list, columns=['chunk_text', 'page_number', 'chapter_title', 'subchapter_title'])
 
-                # Forward fill chapter titles
-                df['chapter_title'] = df['chapter_title'].ffill()
-                df['chapter_title'] = df['chapter_title'].fillna("Unknown Chapter") # Handle cases where no chapter was ever detected
+                # Chapter titles are now assigned during chunking based on state
+                # Subchapter titles are also assigned based on state when chunk is finalized
 
-                # Optionally fill subchapters (use carefully)
-                # df['subchapter_title'] = df['subchapter_title'].fillna("")
+                df['chapter_title'] = df['chapter_title'].fillna("Unknown Chapter / Front Matter") # Fill any remaining NaNs just in case
+                df['subchapter_title'] = df['subchapter_title'].fillna("")
 
-                # Reset index for cleaner display if needed
                 df = df.reset_index(drop=True)
-
                 st.dataframe(df)
 
                 csv_data = df.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="Download data as CSV",
                     data=csv_data,
-                    file_name=f'{uploaded_file.name.replace(".pdf", "")}_structured_chunks_v5.csv',
+                    file_name=f'{uploaded_file.name.replace(".pdf", "")}_structured_chunks_v5_font.csv',
                     mime='text/csv',
-                    key="download_csv_v5"
+                    key="download_csv_v5_font"
                 )
             else:
                 st.error("Chunking failed or resulted in no chunks.")
-elif not tokenizer:
-     st.warning("Waiting for tokenizer...") # Updated message
-elif not st.session_state.get('nltk_checked', False):
-     st.warning("Waiting for NLTK check/download...") # Updated message
