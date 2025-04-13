@@ -26,7 +26,7 @@ def download_nltk_data(resource_name, resource_path):
 def get_dominant_font_stats(page):
     sizes = {}
     try:
-        blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT)["blocks"]
+        blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT | fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE)
         for b in blocks:
             if b['type'] == 0:
                 for l in b["lines"]:
