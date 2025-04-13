@@ -163,7 +163,6 @@ def check_heading_heuristics(line_dict, page_width, dominant_font_size, current_
 
     return None, None
 
-
     # Calculate style ratios (only if total_chars > 0)
     italic_ratio = (italic_chars / total_chars) if total_chars > 0 else 0
     bold_ratio = (bold_chars / total_chars) if total_chars > 0 else 0
