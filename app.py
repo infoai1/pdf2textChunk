@@ -9,9 +9,12 @@ import time
 
 # --- NLTK Download Logic ---
 # Wrap in a function to avoid cluttering the main script body
+
+# --- NLTK Download Logic ---
 @st.cache_resource # Cache the download status
 def ensure_nltk_data():
     data_ok = True
+    # Check for punkt
     try:
         nltk.data.find('tokenizers/punkt')
     except LookupError:
@@ -22,19 +25,24 @@ def ensure_nltk_data():
         except Exception as e:
             st.error(f"Download Error: Failed to download NLTK 'punkt' data: {e}")
             data_ok = False
-    # Check for punkt_tab if needed by your nltk version/usage, though often optional
-    # try:
-    #     nltk.data.find('tokenizers/punkt_tab')
-    # except LookupError:
-    #      st.info("Downloading NLTK data package: 'punkt_tab'...")
-    #      try:
-    #          nltk.download('punkt_tab', quiet=True)
-    #          st.success("NLTK data 'punkt_tab' downloaded.")
-    #      except Exception as e:
-    #          st.error(f"Download Error: Failed to download NLTK 'punkt_tab' data: {e}")
-    #          data_ok = False # Consider if this one is critical
-    return data_ok
 
+    # Check for punkt_tab (THIS IS THE MISSING PART)
+    try:
+        nltk.data.find('tokenizers/punkt_tab') # Add this check
+    except LookupError:
+        st.info("Downloading NLTK data package: 'punkt_tab'...") # Add this download block
+        try:
+            nltk.download('punkt_tab', quiet=True)
+            st.success("NLTK data 'punkt_tab' downloaded.")
+        except Exception as e:
+            st.error(f"Download Error: Failed to download NLTK 'punkt_tab' data: {e}")
+            data_ok = False # Consider if critical, maybe okay to proceed without?
+
+    except Exception as e_find: # General find error
+        st.error(f"NLTK Find Error: An error occurred checking for NLTK data: {e_find}")
+        data_ok = False
+
+    return data_ok # Return overall status
 # --- Tokenizer Setup ---
 @st.cache_resource
 def get_tokenizer():
