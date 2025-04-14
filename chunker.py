@@ -43,35 +43,29 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
         temp_chapter = current_chapter
         temp_subchapter = current_subchapter
         found_sub_after_last_chap = False
-        # Iterate backwards from the item *before* the current content item
-        for j in range(original_list_index -1, -1, -1): # Corrected range start
-            # Unpack 4 items correctly when checking history
+        for j in range(original_list_index -1, -1, -1):
             _, _, ch_title_lookup, sub_title_lookup = sentences_structure[j]
             if ch_title_lookup is not None:
                 temp_chapter = ch_title_lookup
-                # Reset subchapter only if the chapter actually changes relative to the *start* of this loop iteration
-                if temp_chapter != current_chapter and not found_sub_after_last_chap:
-                     temp_subchapter = None
-                break # Stop searching back
-            # Keep track of the most recent subchapter found before hitting the chapter title
+                if not found_sub_after_last_chap: temp_subchapter = None
+                break
             if sub_title_lookup is not None and not found_sub_after_last_chap:
                  temp_subchapter = sub_title_lookup
-                 found_sub_after_last_chap = True # Prevents overwriting with None if chapter is found later
+                 found_sub_after_last_chap = True
 
         # Update state if changed
         if temp_chapter != current_chapter:
             finalize_chunk()
             current_chapter = temp_chapter
-            current_subchapter = temp_subchapter # Apply potentially new subchapter from history
+            current_subchapter = temp_subchapter
         elif temp_subchapter != current_subchapter:
-            finalize_chunk() # Also finalize if subchapter changes for better grouping
+            # Finalize if only subchapter changed for better grouping
+            finalize_chunk()
             current_subchapter = temp_subchapter
 
-        # Process the content item (unpack 4 items)
+        # Process the content item
         text, page_marker, _, detected_sub_title = sentences_structure[original_list_index]
-        # Update current subchapter state *if* this line itself was a subchapter heading
-        if detected_sub_title is not None:
-             current_subchapter = detected_sub_title
+        if detected_sub_title is not None: current_subchapter = detected_sub_title # Update state if this line *is* a sub
 
         try: sentence_tokens = len(tokenizer.encode(text))
         except Exception as e: print(f"Tokenize Error: {e}"); current_content_item_index += 1; continue
@@ -80,13 +74,11 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
         if current_chunk_texts and \
            ((current_chunk_tokens + sentence_tokens > target_tokens and sentence_tokens < target_tokens) or sentence_tokens >= target_tokens):
              finalize_chunk()
-
-             # --- Overlap Logic ---
+             # Overlap Logic
              overlap_start_content_idx = max(0, current_content_item_index - overlap_sentences)
              for k in range(overlap_start_content_idx, current_content_item_index):
                  overlap_original_idx = content_indices[k]
                  if overlap_original_idx < len(sentences_structure):
-                     # Unpack 4 items for overlap source data
                      o_text, o_marker, _, _ = sentences_structure[overlap_original_idx]
                      try:
                          o_tokens = len(tokenizer.encode(o_text))
@@ -95,7 +87,6 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
                          current_chunk_tokens += o_tokens
                      except Exception as e: print(f"Error encoding overlap: {e}")
                  else: print(f"Warn: Overlap index {overlap_original_idx} OOB.")
-             # --- End Overlap Logic ---
 
         # Add current text if not exactly duplicated by overlap ending
         if not current_chunk_texts or text != current_chunk_texts[-1]:
@@ -107,6 +98,6 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
 
         current_content_item_index += 1
 
-    finalize_chunk() # Add last chunk
+    finalize_chunk()
     return chunks_data
 # --- END OF FILE chunker.py ---
