@@ -4,118 +4,104 @@ import fitz  # PyMuPDF
 import tiktoken
 import re
 import nltk
-import statistics
-import time
-
-# --- NLTK Download Logic ---
-# Wrap in a function to avoid cluttering the main script body
+import time # Although not strictly needed in this version without API calls
 
 # --- NLTK Download Logic ---
 @st.cache_resource # Cache the download status
 def ensure_nltk_data():
+    """Checks for and downloads NLTK data if missing."""
     data_ok = True
-    # Check for punkt
-    try:
-        nltk.data.find('tokenizers/punkt')
-    except LookupError:
-        st.info("Downloading NLTK data package: 'punkt'...")
+    resources = {'punkt': 'tokenizers/punkt', 'punkt_tab': 'tokenizers/punkt_tab'}
+    for name, path in resources.items():
         try:
-            nltk.download('punkt', quiet=True)
-            st.success("NLTK data 'punkt' downloaded.")
-        except Exception as e:
-            st.error(f"Download Error: Failed to download NLTK 'punkt' data: {e}")
+            nltk.data.find(path)
+            # st.sidebar.success(f"NLTK '{name}' found.") # Optional success message
+        except LookupError:
+            st.sidebar.info(f"Downloading NLTK data package: '{name}'...")
+            try:
+                nltk.download(name, quiet=True)
+                st.sidebar.success(f"NLTK data '{name}' downloaded.")
+            except Exception as e:
+                st.sidebar.error(f"Download Error: Failed for NLTK '{name}'. Error: {e}")
+                data_ok = False # Mark as failed
+        except Exception as e_find:
+            st.sidebar.error(f"NLTK Find Error ({name}): {e_find}")
             data_ok = False
+    if not data_ok:
+        st.error("Essential NLTK data could not be downloaded/verified. Processing may fail.")
+    return data_ok
 
-    # Check for punkt_tab (THIS IS THE MISSING PART)
-    try:
-        nltk.data.find('tokenizers/punkt_tab') # Add this check
-    except LookupError:
-        st.info("Downloading NLTK data package: 'punkt_tab'...") # Add this download block
-        try:
-            nltk.download('punkt_tab', quiet=True)
-            st.success("NLTK data 'punkt_tab' downloaded.")
-        except Exception as e:
-            st.error(f"Download Error: Failed to download NLTK 'punkt_tab' data: {e}")
-            data_ok = False # Consider if critical, maybe okay to proceed without?
-
-    except Exception as e_find: # General find error
-        st.error(f"NLTK Find Error: An error occurred checking for NLTK data: {e_find}")
-        data_ok = False
-
-    return data_ok # Return overall status
 # --- Tokenizer Setup ---
 @st.cache_resource
 def get_tokenizer():
+    """Initializes and returns the tokenizer."""
     try: return tiktoken.get_encoding("cl100k_base")
     except Exception as e: st.error(f"Error initializing tokenizer: {e}"); return None
 
 # --- PDF Utility Functions ---
 
 def is_likely_metadata_or_footer(line):
-    # (Using the robust version from previous steps)
+    """Basic heuristic to filter out metadata/footers/page numbers."""
     line = line.strip()
     if not line: return True
+    # Try to catch page numbers more reliably (allow optional surrounding chars)
     cleaned_line = re.sub(r"^\W+|\W+$", "", line)
-    if cleaned_line.isdigit() and line == cleaned_line and len(cleaned_line) < 4 : return True
+    if cleaned_line.isdigit() and len(cleaned_line) < 4:
+        return True
+    # Common filtering patterns
     if "www." in line or ".com" in line or "@" in line or "books" in line.lower() or "global" in line.lower() or ("center" in line.lower() and "peace" in line.lower()):
-         if len(line.split()) < 10: return True
-    if re.match(r"^\s*Page\s+\d+\s*$", line, re.IGNORECASE): return True
+        if len(line.split()) < 12: return True # Be a bit more generous
     if "©" in line or "copyright" in line.lower() or "first published" in line.lower() or "isbn" in line.lower(): return True
     if "printed in" in line.lower(): return True
     if any(loc in line.lower() for loc in ["nizamuddin", "new delhi", "noida", "bensalem", "byberry road"]): return True
-    if len(set(line.strip())) < 4 and len(line.strip()) > 4: return True
-    if line.endswith(cleaned_line) and cleaned_line.isdigit() and len(line) < 80 and len(line) > len(cleaned_line) + 2:
-         if not re.search(r"[a-zA-Z]{4,}", line): return True
+    # Filter very short lines that aren't headings (might be remnants)
+    if len(line.split()) <= 1 and len(line) < 10 and not line.isupper() and not line.istitle(): return True
     return False
 
-def check_heading_heuristics_simple(line_dict, current_chapter_title):
-    """ Simplified heuristic focusing on Italic/Bold flags, Title Case, and Length. """
-    line_text = "".join(s["text"] for s in line_dict["spans"]).strip()
-    words = line_text.split()
+def check_heading_simple_layout(block_text, block_bbox, page_width):
+    """
+    Checks ONLY: Is it a single line, short (2-9 words), and roughly centered?
+    Returns ('chapter', text) or (None, None).
+    """
+    # 1. Check if it's a single line block (no internal newlines after stripping)
+    block_text_stripped = block_text.strip()
+    # Check for internal newlines that weren't stripped - indicating multi-line visually
+    if '\n' in block_text_stripped and len(block_text_stripped.split('\n')) > 1 :
+        return None, None
+
+    # 2. Check Length
+    words = block_text_stripped.split()
     num_words = len(words)
-
-    if not line_text or num_words == 0: return None, None
-    if is_likely_metadata_or_footer(line_text): return None, None
-
-    is_italic_hint = False
-    is_bold_hint = False
-    is_title_case = line_text.istitle()
-
-    try: # Check first span font name for style hints
-        if line_dict["spans"]:
-            font_name = line_dict["spans"][0].get('font', '').lower()
-            is_italic_hint = "italic" in font_name
-            is_bold_hint = "bold" in font_name or "black" in font_name
-    except Exception: pass
-
     MAX_HEADING_WORDS = 9
-    MIN_HEADING_WORDS = 2
+    MIN_HEADING_WORDS = 1 # Allow single words if strongly centered
+    is_short = MIN_HEADING_WORDS <= num_words <= MAX_HEADING_WORDS
 
-    # Rule 1: Explicit Keywords
-    if re.match(r"^\s*(CHAPTER|SECTION|PART)\s+[IVXLCDM\d]+", line_text, re.IGNORECASE) and num_words < 8:
-        return 'chapter', line_text
+    # 3. Check Centering (Approximate)
+    is_centered_hint = False
+    if block_bbox and page_width > 0:
+        CENTER_TOLERANCE_RATIO = 0.20 # Allow 20% difference between margins
+        MIN_MARGIN_RATIO = 0.18     # Require at least 18% margin on each side
+        left_margin = block_bbox[0]
+        right_margin = page_width - block_bbox[2]
+        if abs(left_margin - right_margin) < (page_width * CENTER_TOLERANCE_RATIO) and \
+           left_margin > (page_width * MIN_MARGIN_RATIO) and \
+           right_margin > (page_width * MIN_MARGIN_RATIO):
+            is_centered_hint = True
 
-    # Rule 2: Style + Title Case + Short (Likely Chapter)
-    if (is_italic_hint or is_bold_hint) and is_title_case and MIN_HEADING_WORDS <= num_words <= MAX_HEADING_WORDS:
-         if not line_text[-1] in ['.', '?', '!', ':', ',', ';']:
-              return 'chapter', line_text
+    # 4. Decision: If single line, short, and centered -> Chapter
+    if is_short and is_centered_hint:
+        # Final check: ensure it contains letters, not just symbols/numbers
+        if re.search("[a-zA-Z]", block_text_stripped):
+            # print(f"✅ CH (Layout): {block_text_stripped}") # Debug
+            return 'chapter', block_text_stripped
 
-    # Rule 3: Title Case + Short (Subchapter/Chapter Fallback)
-    if is_title_case and MIN_HEADING_WORDS <= num_words <= MAX_HEADING_WORDS + 2:
-         if not line_text[-1] in ['.', '?', '!', ':', ',', ';']:
-             if current_chapter_title: return 'subchapter', line_text
-             else: return 'chapter', line_text
+    return None, None
 
-    # Rule 4: Numbered lists
-    if re.match(r"^\s*[IVXLCDM]+\.?\s+.{3,}", line_text) and num_words < 10: return 'chapter', line_text
-    if re.match(r"^\s*\d+\.?\s+[A-Z].{2,}", line_text) and num_words < 8: return 'chapter', line_text
-
-    return None, None # Not detected
-
+# --- Main Extraction Function (Simplified) ---
 def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_skip=0, start_page_offset=1):
     doc = None
     extracted_data = []
-    current_chapter_title_state = None
+    current_chapter_title_state = "Unknown Chapter / Front Matter" # Start with default
 
     try:
         doc = fitz.open(stream=uploaded_file_content, filetype="pdf")
@@ -125,44 +111,56 @@ def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_sk
             if page_num_0based < start_skip: continue
             if page_num_0based >= total_pages - end_skip: break
             adjusted_page_num = page_num_0based - start_skip + start_page_offset
+            page_width = page.rect.width
 
             try:
-                blocks = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT | fitz.TEXT_PRESERVE_LIGATURES)["blocks"] # Using dict
+                # Use get_text("blocks") for layout info
+                blocks = page.get_text("blocks", sort=True)
+
                 for b in blocks:
-                    if b['type'] == 0: # Text block
-                        for l in b["lines"]:
-                            line_dict = l
-                            line_text = "".join(s["text"] for s in l["spans"]).strip()
+                    block_bbox = b[:4] # Bounding box
+                    block_text = b[4]  # Text content including newlines within block
+                    block_text_clean_for_check = block_text.strip() # For metadata check
 
-                            if not line_text or is_likely_metadata_or_footer(line_text): continue
+                    if not block_text_clean_for_check or is_likely_metadata_or_footer(block_text_clean_for_check):
+                        continue
 
-                            heading_type, heading_text = check_heading_heuristics_simple(
-                                line_dict,
-                                current_chapter_title_state
-                            )
+                    # Check if the block *looks like* a heading based on layout
+                    heading_type, heading_text = check_heading_simple_layout(
+                        block_text, # Pass raw block text
+                        block_bbox,
+                        page_width
+                    )
 
-                            is_heading = heading_type is not None
+                    if heading_type == 'chapter':
+                        current_chapter_title_state = heading_text # Update state
+                        # Append ONLY the heading text itself
+                        extracted_data.append((heading_text, adjusted_page_num, heading_text, None))
+                    else:
+                        # If not a heading, process block content line by line, then sentence by sentence
+                        block_lines = block_text.split('\n')
+                        for line in block_lines:
+                            line_cleaned_for_nltk = line.strip()
+                            if not line_cleaned_for_nltk or is_likely_metadata_or_footer(line_cleaned_for_nltk): continue # Check again per line
 
-                            if heading_type == 'chapter':
-                                current_chapter_title_state = heading_text
-                                extracted_data.append((heading_text, adjusted_page_num, heading_text, None))
-                            elif heading_type == 'subchapter':
-                                extracted_data.append((heading_text, adjusted_page_num, None, heading_text))
-                            else: # Regular text
-                                try:
-                                    sentences_in_line = nltk.sent_tokenize(line_text)
-                                    for sentence in sentences_in_line:
-                                        sentence_clean = sentence.strip()
-                                        if sentence_clean:
-                                            extracted_data.append((sentence_clean, adjusted_page_num, None, None))
-                                except Exception as e_nltk:
-                                    st.warning(f"NLTK Error (Page {adjusted_page_num}): Line '{line_text}'. Error: {e_nltk}")
-                                    if line_text: extracted_data.append((line_text, adjusted_page_num, None, None))
+                            try:
+                                sentences = nltk.sent_tokenize(line_cleaned_for_nltk)
+                                for sentence in sentences:
+                                    sentence_clean = sentence.strip()
+                                    if sentence_clean:
+                                        # Append sentence with current chapter state
+                                        extracted_data.append((sentence_clean, adjusted_page_num, None, None)) # No heading info for sentences
+                            except Exception as e_nltk:
+                                st.warning(f"NLTK Error (Page {adjusted_page_num}): Line '{line_cleaned_for_nltk}'. Error: {e_nltk}")
+                                if line_cleaned_for_nltk: # Append raw line as fallback
+                                    extracted_data.append((line_cleaned_for_nltk, adjusted_page_num, None, None))
 
             except Exception as e_page:
                  st.error(f"Processing Error: Failed to process page {adjusted_page_num}. Error: {e_page}")
                  continue
+
         return extracted_data
+
     except Exception as e_main:
         st.error(f"Main Extraction Error: An unexpected error occurred: {e_main}")
         st.exception(e_main)
@@ -171,7 +169,7 @@ def extract_sentences_with_structure(uploaded_file_content, start_skip=0, end_sk
         if doc: doc.close()
 
 
-# --- Chunker Function (Copied into app.py) ---
+# --- Chunker Function (Simplified for this context) ---
 def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, overlap_sentences):
     if not tokenizer: print("ERROR: Tokenizer not provided."); return []
     if not sentences_structure: print("Warning: No sentences provided."); return []
@@ -180,13 +178,13 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
     current_chunk_texts = []
     current_chunk_pages = []
     current_chunk_tokens = 0
-    current_chapter = "Unknown Chapter / Front Matter"
-    current_subchapter = None
+    current_chapter = "Unknown Chapter / Front Matter" # Initial state
 
+    # Store indices of items that are NOT chapter headings
     content_indices = [i for i, (_, _, ch, _) in enumerate(sentences_structure) if ch is None]
 
     def finalize_chunk():
-        nonlocal chunks_data, current_chunk_texts, current_chunk_pages, current_chunk_tokens, current_chapter, current_subchapter
+        nonlocal chunks_data, current_chunk_texts, current_chunk_pages, current_chunk_tokens, current_chapter
         if current_chunk_texts:
             chunk_text_joined = " ".join(current_chunk_texts).strip()
             start_page = current_chunk_pages[0] if current_chunk_pages else 0
@@ -195,7 +193,8 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
                     "chunk_text": chunk_text_joined,
                     "page_number": start_page,
                     "chapter_title": current_chapter,
-                    "subchapter_title": current_subchapter
+                    # No subchapter detection in this version
+                    "subchapter_title": ""
                 })
             current_chunk_texts = []
             current_chunk_pages = []
@@ -206,35 +205,26 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
     while current_content_item_index < len(content_indices):
         original_list_index = content_indices[current_content_item_index]
 
-        # Find most recent chapter/subchapter state *before* this content item
+        # Find the most recent chapter heading *before or at* this item
         temp_chapter = current_chapter
-        temp_subchapter = current_subchapter
-        found_sub_after_last_chap = False
         for j in range(original_list_index, -1, -1):
-            _, _, ch_title_lookup, sub_title_lookup = sentences_structure[j]
+            _, _, ch_title_lookup, _ = sentences_structure[j]
             if ch_title_lookup is not None:
                 temp_chapter = ch_title_lookup
-                if not found_sub_after_last_chap: temp_subchapter = None
                 break
-            if sub_title_lookup is not None and not found_sub_after_last_chap:
-                 temp_subchapter = sub_title_lookup
-                 found_sub_after_last_chap = True
 
-        # Finalize chunk if chapter changed before this content item
+        # If chapter changed *before* this content item started
         if temp_chapter != current_chapter:
-            finalize_chunk()
-            current_chapter = temp_chapter
-            current_subchapter = temp_subchapter # Apply subchapter belonging to new chapter
-        elif temp_subchapter != current_subchapter:
-            current_subchapter = temp_subchapter # Update if only subchapter changed
+            finalize_chunk() # Finalize chunk under old chapter
+            current_chapter = temp_chapter # Update to the new chapter
 
-        # Process the actual content item
+        # Process the content item (sentence)
         text, page_num, _, _ = sentences_structure[original_list_index]
         sentence_tokens = len(tokenizer.encode(text))
 
-        # Check chunk boundary
+        # Check chunk boundary condition
         if current_chunk_texts and \
-           ((current_chunk_tokens + sentence_tokens > target_tokens and sentence_tokens < target_tokens*0.8) or sentence_tokens >= target_tokens*1.5):
+           (current_chunk_tokens + sentence_tokens > target_tokens and sentence_tokens < target_tokens): # Avoid breaking for single large sentences
             finalize_chunk()
 
             # --- Overlap Logic ---
@@ -243,20 +233,27 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
                  overlap_original_idx = content_indices[k]
                  if overlap_original_idx < len(sentences_structure):
                      o_text, o_page, _, _ = sentences_structure[overlap_original_idx]
-                     # --- THIS IS THE BLOCK WHERE THE ERROR OCCURS ---
-                     # Ensure indentation is correct here (4 spaces relative to 'if' above)
-                     o_tokens = len(tokenizer.encode(o_text)) # LINE 7 Error reported here originally
-                     current_chunk_texts.append(o_text)
-                     current_chunk_pages.append(o_page)
-                     current_chunk_tokens += o_tokens
+                     # --- The line causing the error previously ---
+                     try:
+                         o_tokens = len(tokenizer.encode(o_text)) # Calculate tokens
+                         current_chunk_texts.append(o_text)       # Add text
+                         current_chunk_pages.append(o_page)       # Add page
+                         current_chunk_tokens += o_tokens          # Add tokens
+                     except Exception as encode_err:
+                         print(f"ERROR encoding overlap text: {encode_err} Text: '{o_text[:50]}...'")
                  else:
                      print(f"Warning: Overlap index {overlap_original_idx} out of bounds.")
             # --- End Overlap Logic ---
 
         # Add current text to the chunk
-        current_chunk_texts.append(text)
-        current_chunk_pages.append(page_num)
-        current_chunk_tokens += sentence_tokens
+        # Ensure we don't add the exact same text twice if it was part of the overlap *and* the current item
+        if not current_chunk_texts or text != current_chunk_texts[-1]:
+             current_chunk_texts.append(text)
+             current_chunk_pages.append(page_num)
+             current_chunk_tokens += sentence_tokens
+        elif not current_chunk_pages or page_num != current_chunk_pages[-1]: # Add page even if text is duplicate but page differs
+             current_chunk_pages.append(page_num)
+
 
         current_content_item_index += 1
 
@@ -265,19 +262,19 @@ def chunk_structured_sentences(sentences_structure, tokenizer, target_tokens, ov
 
 # --- Constants ---
 TARGET_TOKENS = 200
-OVERLAP_SENTENCES = 2 # Use 2 sentences for ~10-15% overlap approx
+OVERLAP_SENTENCES = 2 # For ~10-15% overlap
 
-# --- Ensure NLTK data is available ---
+# --- Run NLTK Check ---
 nltk_ready = ensure_nltk_data()
 
-# --- Tokenizer Setup ---
+# --- Get Tokenizer ---
 tokenizer = get_tokenizer()
 
 # --- Streamlit App UI ---
-st.title("PDF Structured Chunker v9 (Single File)")
-st.write("Upload PDF, specify skips/offset. Attempts heading detection based on style, case, length.")
+st.title("PDF Layout Chunker v10 (Simplified)")
+st.write("Focuses on short, centered lines isolated in blocks as potential chapter headings.")
 
-uploaded_file = st.file_uploader("1. Upload Book PDF", type="pdf", key="pdf_uploader_v9")
+uploaded_file = st.file_uploader("1. Upload Book PDF", type="pdf", key="pdf_uploader_v10")
 
 st.sidebar.header("Processing Options")
 start_skip = st.sidebar.number_input("Pages to Skip at START", min_value=0, value=0, step=1)
@@ -287,28 +284,25 @@ start_page_offset = st.sidebar.number_input("Actual Page # of FIRST Processed Pa
 if not tokenizer:
     st.error("Tokenizer could not be loaded.")
 elif not nltk_ready:
-     st.error("NLTK 'punkt' data package could not be verified/downloaded.")
+     st.error("NLTK 'punkt' data could not be verified/downloaded.")
 elif uploaded_file:
-    if st.button("Process PDF", key="chunk_button_v9"):
+    if st.button("Process PDF", key="chunk_button_v10"):
         pdf_content = uploaded_file.getvalue()
         st.info(f"Settings: Skip first {start_skip}, Skip last {end_skip}, Start numbering from page {start_page_offset}")
 
-        with st.spinner("Step 1: Reading PDF and extracting structure..."):
+        with st.spinner("Step 1: Reading PDF & detecting structure..."):
             start_time = time.time()
             sentences_data = extract_sentences_with_structure(
-                pdf_content,
-                start_skip=int(start_skip),
-                end_skip=int(end_skip),
-                start_page_offset=int(start_page_offset)
+                pdf_content, int(start_skip), int(end_skip), int(start_page_offset)
             )
             extract_time = time.time() - start_time
             st.write(f"Extraction took: {extract_time:.2f} seconds")
 
         if sentences_data is None: st.error("Failed to extract data.")
-        elif not sentences_data: st.warning("No text found after cleaning/skipping.")
+        elif not sentences_data: st.warning("No text found.")
         else:
             st.success(f"Extracted {len(sentences_data)} items (sentences/headings).")
-            with st.spinner(f"Step 2: Chunking sentences into ~{TARGET_TOKENS} token chunks..."):
+            with st.spinner(f"Step 2: Chunking into ~{TARGET_TOKENS} token chunks..."):
                 start_time = time.time()
                 chunk_list = chunk_structured_sentences(
                     sentences_data, tokenizer, TARGET_TOKENS, OVERLAP_SENTENCES
@@ -317,17 +311,17 @@ elif uploaded_file:
                 st.write(f"Chunking took: {chunk_time:.2f} seconds")
 
             if chunk_list:
-                st.success(f"Text chunked into {len(chunk_list)} chunks.")
+                st.success(f"Chunked into {len(chunk_list)} chunks.")
                 df = pd.DataFrame(chunk_list, columns=['chunk_text', 'page_number', 'chapter_title', 'subchapter_title'])
                 df['chapter_title'] = df['chapter_title'].fillna("Unknown Chapter / Front Matter")
-                df['subchapter_title'] = df['subchapter_title'].fillna("")
+                df['subchapter_title'] = "" # No subchapter detection here
                 df = df.reset_index(drop=True)
                 st.dataframe(df[['chunk_text', 'page_number', 'chapter_title']]) # Display main columns
 
                 csv_data = df[['chunk_text', 'page_number', 'chapter_title']].to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="Download data as CSV", data=csv_data,
-                    file_name=f'{uploaded_file.name.replace(".pdf", "")}_chunks_v9.csv',
-                    mime='text/csv', key="download_csv_v9"
+                    file_name=f'{uploaded_file.name.replace(".pdf", "")}_layout_chunks_v10.csv',
+                    mime='text/csv', key="download_csv_v10"
                 )
             else: st.error("Chunking failed.")
