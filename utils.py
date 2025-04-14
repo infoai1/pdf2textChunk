@@ -3,9 +3,8 @@ import streamlit as st
 import nltk
 import tiktoken
 
-@st.cache_resource
+@st.cache_resource # Cache the download status
 def ensure_nltk_data():
-    """Checks for and downloads NLTK data if missing."""
     data_ok = True
     resources = {'punkt': 'tokenizers/punkt'} # Only punkt needed usually
     for name, path in resources.items():
