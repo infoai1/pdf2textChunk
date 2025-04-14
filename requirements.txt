@@ -3,4 +3,4 @@ pandas
 PyMuPDF
 tiktoken
 nltk
-statistics
+python-docx
